@@ -15,7 +15,7 @@
     "PRICE_MARKUP": "1.5"
   },
   // Create with: wrangler kv namespace create PROVIDERS  → paste the id below.
-  "kv_namespaces": [{ "binding": "PROVIDERS", "id": "00000000000000000000000000000000" }],
+  "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
   // Continuous provider health monitoring.
   "triggers": { "crons": ["*/5 * * * *"] },
   "env": {
@@ -28,7 +28,7 @@
         "RELAY_URL": "https://x402-relay.aibtc.dev",
         "PRICE_MARKUP": "1.5"
       },
-      "kv_namespaces": [{ "binding": "PROVIDERS", "id": "00000000000000000000000000000000" }],
+      "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
       "triggers": { "crons": ["*/5 * * * *"] }
     },
     "production": {
@@ -40,7 +40,7 @@
         "RELAY_URL": "https://x402-relay.aibtc.com",
         "PRICE_MARKUP": "1.5"
       },
-      "kv_namespaces": [{ "binding": "PROVIDERS", "id": "00000000000000000000000000000000" }],
+      "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
       "triggers": { "crons": ["*/5 * * * *"] }
     }
   }
