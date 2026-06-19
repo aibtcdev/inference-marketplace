@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-14",
+  "compatibility_flags": ["nodejs_compat_v2"],
+  "workers_dev": true,
+  "vars": {
+    "NETWORK": "mainnet",
+    "RELAY_URL": "https://x402-relay.aibtc.com",
+    "PRICE_MARKUP": "1.5"
+  },
+  "env": {
+    "staging": {
+      "name": "gateway-staging",
+      "workers_dev": true,
+      "vars": {
+        "NETWORK": "testnet",
+        "RELAY_URL": "https://x402-relay.aibtc.dev",
+        "PRICE_MARKUP": "1.5"
+      }
+    },
+    "production": {
+      "name": "gateway",
+      "workers_dev": false,
+      "vars": {
+        "NETWORK": "mainnet",
+        "RELAY_URL": "https://x402-relay.aibtc.com",
+        "PRICE_MARKUP": "1.5"
+      }
+    }
+  }
+}
