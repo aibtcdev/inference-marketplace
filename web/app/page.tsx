@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-const GATEWAY = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8787";
+// Same-origin in production (the Worker serves both UI and API); override via
+// NEXT_PUBLIC_GATEWAY_URL for split local dev (next dev + wrangler dev).
+const GATEWAY = process.env.NEXT_PUBLIC_GATEWAY_URL ?? "";
 
 type Health = { status: string; latencyMs: number; x402: boolean; checkedAt: string; error?: string } | null;
 type ModelSpec = { id: string; name?: string; contextLength?: number; capabilities?: string[]; pricePerMTokenUsd?: number };

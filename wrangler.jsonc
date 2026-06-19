@@ -5,6 +5,10 @@
   "compatibility_date": "2026-01-14",
   "compatibility_flags": ["nodejs_compat_v2"],
   "workers_dev": true,
+  // The Worker serves the static dashboard (web/out) AND the /v1/* API.
+  // Requests matching a built asset are served directly; everything else runs
+  // the Worker (so /v1/*, /health hit Hono).
+  "assets": { "directory": "./web/out" },
   "vars": {
     "NETWORK": "mainnet",
     "RELAY_URL": "https://x402-relay.aibtc.com",
@@ -18,6 +22,7 @@
     "staging": {
       "name": "gateway-staging",
       "workers_dev": true,
+      "assets": { "directory": "./web/out" },
       "vars": {
         "NETWORK": "testnet",
         "RELAY_URL": "https://x402-relay.aibtc.dev",
@@ -29,6 +34,7 @@
     "production": {
       "name": "gateway",
       "workers_dev": false,
+      "assets": { "directory": "./web/out" },
       "vars": {
         "NETWORK": "mainnet",
         "RELAY_URL": "https://x402-relay.aibtc.com",
