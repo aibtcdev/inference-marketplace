@@ -48,7 +48,41 @@ export interface ProviderInput {
   description?: string;
   /** Shared secret the endpoint requires; stored server-side, never returned. */
   apiKey?: string;
+  /** Dev/testnet only: permit http://localhost endpoints. */
+  allowLocal?: boolean;
   reputationAgentId?: number;
+}
+
+/** Loopback / private / link-local / metadata hosts we must never fetch (SSRF). */
+function isPrivateHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h === '0.0.0.0' || h === '::1') return true;
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const a = Number(m[1]), b = Number(m[2]);
+    if (a === 10 || a === 127 || a === 0) return true;
+    if (a === 169 && b === 254) return true; // link-local + cloud metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  }
+  if (/^(fc|fd|fe8|fe9|fea|feb)/.test(h)) return true; // IPv6 ULA / link-local
+  return false;
+}
+
+/** Guard the URLs the gateway will fetch. Prevents SSRF to internal resources. */
+export function assertSafeEndpoint(endpoint: string, allowLocal: boolean): void {
+  let u: URL;
+  try { u = new URL(endpoint); } catch { throw new Error('endpoint must be a valid URL (e.g. https://host/v1)'); }
+  if (allowLocal) {
+    if (u.protocol === 'https:') return;
+    if (u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1')) return;
+    throw new Error('endpoint must be https (or http://localhost in dev)');
+  }
+  if (u.protocol !== 'https:') throw new Error('endpoint must be an https URL');
+  if (isPrivateHost(u.hostname)) {
+    throw new Error('endpoint must be a public host (loopback/private/metadata addresses are not allowed)');
+  }
 }
 
 /** KV key holding a provider's shared secret (kept out of the provider record). */
@@ -82,10 +116,8 @@ export async function registerProvider(kv: KV, input: ProviderInput): Promise<Pr
   const models = normalizeModels(input.models);
   const api = (input.api || 'openai-chat').trim();
 
-  const isHttps = /^https:\/\/.+/.test(endpoint);
-  const isLocal = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/.*)?$/.test(endpoint);
   if (!name) throw new Error('name is required (set it in schema.json or the form)');
-  if (!isHttps && !isLocal) throw new Error('endpoint must be an https URL (e.g. https://host/v1)');
+  assertSafeEndpoint(endpoint, input.allowLocal ?? false); // SSRF guard
   if (!/^S[PM][0-9A-Z]+$/.test(payoutAddress)) throw new Error('payoutAddress must be a mainnet Stacks address (SP… / SM…)');
   if (!models.length) throw new Error('at least one model (with an id) is required');
 

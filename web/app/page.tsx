@@ -321,47 +321,9 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  // local-model connect flow
   const [lf, setLf] = useState({ name: "", payoutAddress: "", models: "", port: "11434" });
-  const [connect, setConnect] = useState<{ command: string; providerId: string } | null>(null);
-  const [live, setLive] = useState(false);
-
-  // public-URL flow
   const [src, setSrc] = useState("");
-
-  // poll until the provider's node comes online
-  useEffect(() => {
-    if (!connect || live) return;
-    const t = setInterval(async () => {
-      try {
-        const r = await fetch(`${GATEWAY}/v1/providers`);
-        const d = await r.json();
-        const p = (d.data as Provider[] | undefined)?.find((x) => x.id === connect.providerId);
-        if (p && p.status === "live") { setLive(true); onDone(); }
-      } catch { /* keep polling */ }
-    }, 3000);
-    return () => clearInterval(t);
-  }, [connect, live, onDone]);
-
-  async function connectLocal(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setBusy(true); setResult(null);
-    try {
-      const r = await fetch(`${GATEWAY}/v1/connect`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: lf.name,
-          payoutAddress: lf.payoutAddress,
-          models: lf.models.split(",").map((s) => s.trim()).filter(Boolean),
-          port: Number(lf.port) || 11434,
-        }),
-      });
-      const j = await r.json();
-      if (r.ok) setConnect({ command: j.command, providerId: j.providerId });
-      else setResult({ ok: false, msg: j.error || "Couldn't set up the tunnel." });
-    } catch { setResult({ ok: false, msg: "Gateway unreachable." }); }
-    finally { setBusy(false); }
-  }
+  const [pubKey, setPubKey] = useState("");
 
   async function sendPublic(payload: Record<string, unknown>) {
     setBusy(true); setResult(null);
@@ -375,6 +337,8 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
   }
 
   const inputCls = "w-full rounded-lg border border-[#23262d] bg-[#0b0d10] px-3 py-2.5 text-sm outline-none placeholder:text-[#5b626c] focus:border-[#f7931a]";
+  const gw = typeof window !== "undefined" ? window.location.origin : GATEWAY;
+  const cmd = `curl -fsSL ${gw}/connect.sh | NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "qwen2.5-7b"} PORT=${lf.port || "11434"} GATEWAY=${gw} bash`;
 
   return (
     <div className="overlay-in fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm" onClick={onClose}>
@@ -382,59 +346,53 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
         <div className="flex items-start justify-between">
           <div>
             <h2 className="wide text-lg">List your model</h2>
-            <p className="mt-1 text-sm text-[#9aa3af]">We set everything up — you just run one line.</p>
+            <p className="mt-1 text-sm text-[#9aa3af]">Get paid in sBTC for serving inference.</p>
           </div>
           <button onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-[#9aa3af] hover:bg-[#15181d] hover:text-[#f2f4f7]">✕</button>
         </div>
 
-        {!connect && (
-          <div className="mt-4 flex gap-1 rounded-lg border border-[#23262d] bg-[#0b0d10] p-1 text-sm">
-            {(["local", "public"] as const).map((t) => (
-              <button key={t} onClick={() => setTab(t)} className={`flex-1 rounded-md py-1.5 ${tab === t ? "bg-[#15181d] text-[#f2f4f7]" : "text-[#9aa3af]"}`}>
-                {t === "local" ? "Running locally" : "Already public"}
-              </button>
-            ))}
-          </div>
-        )}
+        <div className="mt-4 flex gap-1 rounded-lg border border-[#23262d] bg-[#0b0d10] p-1 text-sm">
+          {(["local", "public"] as const).map((t) => (
+            <button key={t} onClick={() => setTab(t)} className={`flex-1 rounded-md py-1.5 ${tab === t ? "bg-[#15181d] text-[#f2f4f7]" : "text-[#9aa3af]"}`}>
+              {t === "local" ? "Running locally" : "Already public"}
+            </button>
+          ))}
+        </div>
 
-        {/* connected → show the one command + live status */}
-        {connect ? (
-          live ? (
-            <div className="mt-5 rounded-lg border px-4 py-5 text-center" style={{ borderColor: "rgba(53,199,89,.4)", background: "rgba(53,199,89,.08)" }}>
-              <div className="text-2xl">🟢</div>
-              <div className="mt-1 font-medium">Live on the marketplace</div>
-              <button onClick={onClose} className="mt-3 rounded-lg bg-[#f7931a] px-5 py-2 text-sm font-medium text-[#1a1206]">Done</button>
-            </div>
-          ) : (
-            <div className="mt-4">
-              <p className="text-sm text-[#9aa3af]">Run this once in your terminal — that&apos;s the only step:</p>
-              <div className="mt-2"><Snippet label="one-time setup" code={connect.command} /></div>
-              <div className="mt-4 flex items-center gap-2 text-sm text-[#9aa3af]">
-                <span className="h-2 w-2 animate-pulse rounded-full bg-[#ffbf2e]" />
-                Waiting for your node to come online…
-              </div>
-            </div>
-          )
-        ) : tab === "local" ? (
-          <form onSubmit={connectLocal} className="mt-4">
+        {tab === "local" ? (
+          <div className="mt-4">
             {[
               { k: "name" as const, label: "Display name", ph: "Alice's Qwen node" },
               { k: "payoutAddress" as const, label: "Payout wallet", ph: "SP…" },
               { k: "models" as const, label: "Model ids (comma-separated)", ph: "qwen2.5-7b" },
               { k: "port" as const, label: "Local model port", ph: "11434" },
             ].map((f) => (
-              <label key={f.k} className="mb-3.5 block">
+              <label key={f.k} className="mb-3 block">
                 <span className="mb-1.5 block text-xs text-[#9aa3af]">{f.label}</span>
-                <input required value={lf[f.k]} onChange={(e) => setLf({ ...lf, [f.k]: e.target.value })} placeholder={f.ph} className={inputCls} />
+                <input value={lf[f.k]} onChange={(e) => setLf({ ...lf, [f.k]: e.target.value })} placeholder={f.ph} className={inputCls} />
               </label>
             ))}
-            <button disabled={busy} className="mt-1 w-full rounded-lg bg-[#f7931a] py-3 text-sm font-medium text-[#1a1206] transition-opacity hover:opacity-90 disabled:opacity-60">{busy ? "Setting up…" : "Connect"}</button>
-          </form>
+            <p className="mb-2 mt-1 text-xs text-[#9aa3af]">Run this one command — it secures your model behind a key, tunnels it, and lists it:</p>
+            <Snippet label="one command — secures · tunnels · registers" code={cmd} />
+            <p className="mt-2 text-xs text-[#9aa3af]">Keep it running. Your node appears in the list once it&apos;s live.</p>
+            <p className="mt-2 rounded-md border border-[#ffbf2e]/25 bg-[#ffbf2e]/[0.06] px-2.5 py-2 text-xs text-[#9aa3af]">
+              ⚠️ <span className="text-[#ffbf2e]">Temporary</span> — the URL changes on restart, ~200 concurrent max. For a permanent URL:
+            </p>
+            <p className="mb-2 mt-3 text-xs text-[#9aa3af]">Permanent (named tunnel on your Cloudflare account):</p>
+            <Snippet
+              label="one-time setup, then run connect.sh with TUNNEL= HOST="
+              code={`cloudflared tunnel login\ncloudflared tunnel create my-node\ncloudflared tunnel route dns my-node node.yourdomain.com\n\nTUNNEL=my-node HOST=node.yourdomain.com \\\n  NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "qwen2.5-7b"} PORT=${lf.port || "11434"} GATEWAY=${gw} \\\n  ./connect.sh`}
+            />
+          </div>
         ) : (
-          <form onSubmit={(e) => { e.preventDefault(); sendPublic(src.trim().endsWith(".json") ? { manifestUrl: src.trim() } : { endpoint: src.trim() }); }} className="mt-4">
+          <form onSubmit={(e) => { e.preventDefault(); const base = src.trim().endsWith(".json") ? { manifestUrl: src.trim() } : { endpoint: src.trim() }; sendPublic(pubKey.trim() ? { ...base, apiKey: pubKey.trim() } : base); }} className="mt-4">
             <label className="block">
               <span className="mb-1.5 block text-xs text-[#9aa3af]">Public endpoint or schema.json URL</span>
               <input required value={src} onChange={(e) => setSrc(e.target.value)} placeholder="https://your-host/v1" className={inputCls} />
+            </label>
+            <label className="mt-3 block">
+              <span className="mb-1.5 block text-xs text-[#9aa3af]">API key (optional — if your endpoint requires one)</span>
+              <input value={pubKey} onChange={(e) => setPubKey(e.target.value)} placeholder="leave blank if open" className={inputCls} />
             </label>
             <p className="mt-2 text-xs text-[#9aa3af]">Already on a server? Paste the URL — we verify and list it.</p>
             <button disabled={busy} className="mt-4 w-full rounded-lg bg-[#f7931a] py-3 text-sm font-medium text-[#1a1206] transition-opacity hover:opacity-90 disabled:opacity-60">{busy ? "Verifying…" : "Register & verify"}</button>

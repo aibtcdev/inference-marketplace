@@ -15,7 +15,6 @@ import { getProvider } from './registry';
 import * as directory from './directory';
 import { checkEndpoint, verifyProvider } from './health';
 import { REGISTRATION_SCHEMA } from './schema';
-import { provisionTunnel, deprovisionTunnel, cloudflareConfigured } from './cloudflare';
 import { quotePrice, realizedCostUsd, estimateTokens, usdToBaseUnits } from './pricing';
 import type { Quote } from './pricing';
 
@@ -36,11 +35,6 @@ type Env = {
   PRICE_MARKUP?: string;
   /** DEV-ONLY: 'true' bypasses payment on non-mainnet (see x402-middleware). */
   SKIP_PAYMENT?: string;
-  /** Cloudflare tunnel provisioning (optional; enables POST /v1/connect). */
-  CF_API_TOKEN?: string;
-  CF_ACCOUNT_ID?: string;
-  CF_ZONE_ID?: string;
-  CF_PROVIDER_DOMAIN?: string;
 };
 
 type Variables = {
@@ -341,7 +335,8 @@ app.post('/v1/providers', async (c) => {
     }
   }
 
-  // Validate + store (status pending).
+  // Validate + store (status pending). Allow http://localhost only off mainnet.
+  reg.allowLocal = (c.env.NETWORK || 'testnet') !== 'mainnet';
   let provider;
   try {
     provider = await directory.registerProvider(c.env.PROVIDERS, reg);
@@ -373,85 +368,12 @@ app.post('/v1/providers/:id/check', async (c) => {
   return c.json({ provider: updated });
 });
 
-// Remove a provider (operator/self-service) — also tears down its tunnel.
+// Remove a provider (operator/self-service).
 app.delete('/v1/providers/:id', async (c) => {
-  const id = c.req.param('id');
-  const tunnelId = await c.env.PROVIDERS.get(`tunnel:${id}`);
-  const ok = await directory.removeProvider(c.env.PROVIDERS, id);
-  if (tunnelId) { await deprovisionTunnel(c.env, tunnelId); await c.env.PROVIDERS.delete(`tunnel:${id}`); }
+  const ok = await directory.removeProvider(c.env.PROVIDERS, c.req.param('id'));
   return c.json({ removed: ok }, ok ? 200 : 404);
 });
 
-// One-click connect: provision a Cloudflare tunnel for the provider's LOCAL
-// model and return a single command to run. No Cloudflare account on their side.
-const PROXY_PORT = 8799;
-
-app.post('/v1/connect', async (c) => {
-  if (!cloudflareConfigured(c.env)) {
-    return c.json({ error: 'Tunnel provisioning is not configured on this gateway.' }, 501);
-  }
-  let body: { name?: string; payoutAddress?: string; models?: Array<string | { id: string }>; port?: number };
-  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
-  const port = Number(body.port) || 11434;
-
-  const subId = crypto.randomUUID().slice(0, 10);
-  const key = (crypto.randomUUID() + crypto.randomUUID()).replace(/-/g, '');
-
-  let prov;
-  try {
-    prov = await provisionTunnel(c.env, { subId, servicePort: PROXY_PORT });
-  } catch (e) {
-    return c.json({ error: `Provisioning failed: ${e instanceof Error ? e.message : String(e)}` }, 502);
-  }
-
-  // Register as pending + secured. Goes live once the provider runs the command
-  // and the next health check reaches it.
-  let provider;
-  try {
-    provider = await directory.registerProvider(c.env.PROVIDERS, {
-      name: body.name ?? `provider-${subId}`,
-      endpoint: `https://${prov.hostname}/v1`,
-      payoutAddress: body.payoutAddress ?? '',
-      models: body.models ?? [],
-      apiKey: key,
-    });
-  } catch (e) {
-    await deprovisionTunnel(c.env, prov.tunnelId);
-    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
-  }
-  await c.env.PROVIDERS.put(`tunnel:${provider.id}`, prov.tunnelId);
-
-  const origin = new URL(c.req.url).origin;
-  const command = `KEY=${key} TOKEN=${prov.token} PORT=${port} bash <(curl -fsSL ${origin}/agent.sh)`;
-  return c.json({ providerId: provider.id, hostname: prov.hostname, command });
-});
-
-// The provider agent: starts a keyed auth proxy in front of the local model,
-// then runs the Cloudflare connector. Self-contained (no repo checkout needed).
-const AGENT_SH = `#!/usr/bin/env bash
-set -euo pipefail
-[ -z "\${KEY:-}" ] && { echo "KEY required"; exit 1; }
-[ -z "\${TOKEN:-}" ] && { echo "TOKEN required"; exit 1; }
-PORT="\${PORT:-11434}"; PROXY_PORT="\${PROXY_PORT:-8799}"
-command -v cloudflared >/dev/null 2>&1 || { command -v brew >/dev/null 2>&1 && brew install cloudflared || { echo "Install cloudflared first"; exit 1; }; }
-cat > /tmp/mkt-proxy.mjs <<'PROXY'
-import {createServer,request} from 'node:http';
-const KEY=process.env.PROXY_KEY,UP=new URL(process.env.UPSTREAM);
-createServer((req,res)=>{
-  if((req.headers.authorization||'')!=='Bearer '+KEY){res.writeHead(401);res.end('{"error":"unauthorized"}');return;}
-  const h=Object.assign({},req.headers,{host:UP.host}); delete h.authorization;
-  const up=request({hostname:UP.hostname,port:UP.port||80,path:req.url,method:req.method,headers:h},function(u){res.writeHead(u.statusCode||502,u.headers);u.pipe(res);});
-  up.on('error',function(e){res.writeHead(502);res.end(String(e));}); req.pipe(up);
-}).listen(Number(process.env.PROXY_PORT||8799));
-PROXY
-PROXY_KEY="$KEY" PROXY_PORT="$PROXY_PORT" UPSTREAM="http://localhost:$PORT" node /tmp/mkt-proxy.mjs &
-PROXY_PID=$!
-trap 'kill $PROXY_PID 2>/dev/null' EXIT
-echo "Secured proxy up. Connecting to the marketplace…"
-cloudflared tunnel run --token "$TOKEN"
-`;
-
-app.get('/agent.sh', (c) => c.text(AGENT_SH, 200, { 'Content-Type': 'text/x-shellscript' }));
 
 // Test console: proxy a chat completion to a provider's endpoint so anyone can
 // try it from the UI (server-side call avoids browser CORS). Auto-discovers the
