@@ -322,10 +322,39 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
   const [tab, setTab] = useState<"local" | "public">("local");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [watching, setWatching] = useState(false);
 
-  const [lf, setLf] = useState({ name: "", payoutAddress: "", models: "", port: "11434" });
+  const [lf, setLf] = useState({ name: "", payoutAddress: "", models: "", port: "11434", host: "" });
   const [src, setSrc] = useState("");
   const [pubKey, setPubKey] = useState("");
+
+  // After the user runs the connect command on their machine, the script
+  // registers itself — so we poll the directory and confirm the moment the
+  // node shows up (matched by wallet + display name).
+  useEffect(() => {
+    if (!watching) return;
+    let alive = true;
+    const want = { name: lf.name.trim(), wallet: lf.payoutAddress.trim() };
+    const tick = async () => {
+      try {
+        const r = await fetch(`${GATEWAY}/v1/providers`);
+        const j = await r.json();
+        const me = (j.data as Provider[] | undefined)?.find(
+          (p) => p.payoutAddress === want.wallet && p.name.trim() === want.name
+        );
+        if (me && alive) {
+          setWatching(false);
+          setResult({ ok: true, msg: "Detected ✓ your node is live in the directory." });
+          onDone();
+          setTimeout(onClose, 2000);
+          return;
+        }
+      } catch { /* keep polling */ }
+      if (alive) setTimeout(tick, 4000);
+    };
+    tick();
+    return () => { alive = false; };
+  }, [watching, lf.name, lf.payoutAddress, onDone, onClose]);
 
   async function sendPublic(payload: Record<string, unknown>) {
     setBusy(true); setResult(null);
@@ -341,6 +370,9 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
   const inputCls = "w-full rounded-lg border border-[#23262d] bg-[#0b0d10] px-3 py-2.5 text-sm outline-none placeholder:text-[#5b626c] focus:border-[#f7931a]";
   const gw = typeof window !== "undefined" ? window.location.origin : GATEWAY;
   const cmd = `curl -fsSL ${gw}/connect.sh | NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "Qwen/Qwen2.5-7B-Instruct"} PORT=${lf.port || "11434"} GATEWAY=${gw} bash`;
+  const host = lf.host.trim() || "node.yourdomain.com";
+  const tunnel = (lf.host.trim().split(".")[0] || "my-node").replace(/[^a-z0-9-]/gi, "-");
+  const permaCmd = `cloudflared tunnel login\ncloudflared tunnel create ${tunnel}\ncloudflared tunnel route dns ${tunnel} ${host}\n\nTUNNEL=${tunnel} HOST=${host} \\\n  NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "Qwen/Qwen2.5-7B-Instruct"} PORT=${lf.port || "11434"} GATEWAY=${gw} \\\n  ./connect.sh`;
 
   return (
     <div className="overlay-in fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm sm:p-6" onClick={onClose}>
@@ -365,6 +397,7 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
 
         {tab === "local" ? (
           <div className="mt-4">
+            <p className="mb-3 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 1.</span> Your node details (these fill the command below):</p>
             {[
               { k: "name" as const, label: "Display name", ph: "Alice's Qwen node" },
               { k: "payoutAddress" as const, label: "Payout wallet", ph: "SP…" },
@@ -376,17 +409,41 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
                 <input value={lf[f.k]} onChange={(e) => setLf({ ...lf, [f.k]: e.target.value })} placeholder={f.ph} className={inputCls} />
               </label>
             ))}
-            <p className="mb-2 mt-1 text-xs text-[#9aa3af]">Run this one command — it secures your model behind a key, tunnels it, and lists it:</p>
+            <p className="mb-2 mt-1 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 2.</span> Pick one and run it in your terminal — it secures your model behind a key, tunnels it, and registers it. No submit here: the command does it.</p>
+
+            <p className="mb-1.5 mt-3 text-[11px] uppercase tracking-wide text-[#5b626c]">Option A · quick (temporary URL)</p>
             <Snippet label="one command — secures · tunnels · registers" code={cmd} />
-            <p className="mt-2 text-xs text-[#9aa3af]">Keep it running. Your node appears in the list once it&apos;s live.</p>
-            <p className="mt-2 rounded-md border border-[#ffbf2e]/25 bg-[#ffbf2e]/[0.06] px-2.5 py-2 text-xs text-[#9aa3af]">
-              ⚠️ <span className="text-[#ffbf2e]">Temporary</span> — the URL changes on restart, ~200 concurrent max. For a permanent URL:
+            <p className="mt-1.5 rounded-md border border-[#ffbf2e]/25 bg-[#ffbf2e]/[0.06] px-2.5 py-2 text-[11px] text-[#9aa3af]">
+              ⚠️ <span className="text-[#ffbf2e]">Temporary</span> — the URL changes on restart, ~200 concurrent max. Fine for a demo; use Option B for a real node.
             </p>
-            <p className="mb-2 mt-3 text-xs text-[#9aa3af]">Permanent (named tunnel on your Cloudflare account):</p>
-            <Snippet
-              label="one-time setup, then run connect.sh with TUNNEL= HOST="
-              code={`cloudflared tunnel login\ncloudflared tunnel create my-node\ncloudflared tunnel route dns my-node node.yourdomain.com\n\nTUNNEL=my-node HOST=node.yourdomain.com \\\n  NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "Qwen/Qwen2.5-7B-Instruct"} PORT=${lf.port || "11434"} GATEWAY=${gw} \\\n  ./connect.sh`}
-            />
+
+            <p className="mb-1.5 mt-4 text-[11px] uppercase tracking-wide text-[#5b626c]">Option B · permanent (named tunnel on your Cloudflare account)</p>
+            <label className="mb-2 block">
+              <span className="mb-1.5 block text-xs text-[#9aa3af]">Your hostname (a subdomain on a domain in your Cloudflare account)</span>
+              <input value={lf.host} onChange={(e) => setLf({ ...lf, host: e.target.value })} placeholder="qwen.aibtc.com" className={inputCls} />
+            </label>
+            <Snippet label="one-time setup, then run connect.sh with TUNNEL= HOST=" code={permaCmd} />
+
+            <div className="mt-5 border-t border-[#23262d] pt-4">
+              <p className="mb-2 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 3.</span> Whichever you ran, keep it running — then watch for your node to appear:</p>
+              {watching ? (
+                <button onClick={() => setWatching(false)} className="flex w-full items-center justify-center gap-2 rounded-lg border border-[#23262d] bg-[#0b0d10] py-3 text-sm text-[#9aa3af] hover:text-[#f2f4f7]">
+                  <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#f7931a] border-t-transparent" />
+                  Watching for your node… (cancel)
+                </button>
+              ) : (
+                <button
+                  onClick={() => { setResult(null); setWatching(true); }}
+                  disabled={!lf.name.trim() || !lf.payoutAddress.trim()}
+                  className="w-full rounded-lg bg-[#f7931a] py-3 text-sm font-medium text-[#1a1206] transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  I&apos;ve run it — watch for my node
+                </button>
+              )}
+              {!lf.name.trim() || !lf.payoutAddress.trim() ? (
+                <p className="mt-1.5 text-[11px] text-[#5b626c]">Fill name + wallet above so we can match your node.</p>
+              ) : null}
+            </div>
           </div>
         ) : (
           <form onSubmit={(e) => { e.preventDefault(); const base = src.trim().endsWith(".json") ? { manifestUrl: src.trim() } : { endpoint: src.trim() }; sendPublic(pubKey.trim() ? { ...base, apiKey: pubKey.trim() } : base); }} className="mt-4">
