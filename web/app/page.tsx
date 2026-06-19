@@ -343,9 +343,9 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
   const cmd = `curl -fsSL ${gw}/connect.sh | NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "Qwen/Qwen2.5-7B-Instruct"} PORT=${lf.port || "11434"} GATEWAY=${gw} bash`;
 
   return (
-    <div className="overlay-in fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm" onClick={onClose}>
-      <div className="modal-in w-full max-w-md rounded-2xl border border-[#23262d] bg-[#101216] p-6 shadow-2xl" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
-        <div className="flex items-start justify-between">
+    <div className="overlay-in fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm sm:p-6" onClick={onClose}>
+      <div className="modal-in flex h-[90vh] w-[90vw] flex-col overflow-hidden rounded-2xl border border-[#23262d] bg-[#101216] shadow-2xl" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="flex shrink-0 items-start justify-between border-b border-[#23262d] px-5 py-4 sm:px-6">
           <div>
             <h2 className="wide text-lg">List your model</h2>
             <p className="mt-1 text-sm text-[#9aa3af]">Get paid in sBTC for serving inference.</p>
@@ -353,7 +353,9 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
           <button onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-[#9aa3af] hover:bg-[#15181d] hover:text-[#f2f4f7]">✕</button>
         </div>
 
-        <div className="mt-4 flex gap-1 rounded-lg border border-[#23262d] bg-[#0b0d10] p-1 text-sm">
+        <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6">
+          <div className="mx-auto w-full max-w-2xl">
+        <div className="flex gap-1 rounded-lg border border-[#23262d] bg-[#0b0d10] p-1 text-sm">
           {(["local", "public"] as const).map((t) => (
             <button key={t} onClick={() => setTab(t)} className={`flex-1 rounded-md py-1.5 ${tab === t ? "bg-[#15181d] text-[#f2f4f7]" : "text-[#9aa3af]"}`}>
               {t === "local" ? "Running locally" : "Already public"}
@@ -406,6 +408,8 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
             {result.msg}
           </div>
         )}
+          </div>
+        </div>
       </div>
     </div>
   );
