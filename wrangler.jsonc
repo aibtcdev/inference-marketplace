@@ -10,6 +10,10 @@
     "RELAY_URL": "https://x402-relay.aibtc.com",
     "PRICE_MARKUP": "1.5"
   },
+  // Create with: wrangler kv namespace create PROVIDERS  → paste the id below.
+  "kv_namespaces": [{ "binding": "PROVIDERS", "id": "00000000000000000000000000000000" }],
+  // Continuous provider health monitoring.
+  "triggers": { "crons": ["*/5 * * * *"] },
   "env": {
     "staging": {
       "name": "gateway-staging",
@@ -18,7 +22,9 @@
         "NETWORK": "testnet",
         "RELAY_URL": "https://x402-relay.aibtc.dev",
         "PRICE_MARKUP": "1.5"
-      }
+      },
+      "kv_namespaces": [{ "binding": "PROVIDERS", "id": "00000000000000000000000000000000" }],
+      "triggers": { "crons": ["*/5 * * * *"] }
     },
     "production": {
       "name": "gateway",
@@ -27,7 +33,9 @@
         "NETWORK": "mainnet",
         "RELAY_URL": "https://x402-relay.aibtc.com",
         "PRICE_MARKUP": "1.5"
-      }
+      },
+      "kv_namespaces": [{ "binding": "PROVIDERS", "id": "00000000000000000000000000000000" }],
+      "triggers": { "crons": ["*/5 * * * *"] }
     }
   }
 }

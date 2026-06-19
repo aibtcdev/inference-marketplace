@@ -36,6 +36,8 @@ export interface TokenContract {
 export interface X402Config {
   amount: string;
   tokenType: TokenType;
+  /** Recipient override — pay a specific provider directly (non-custodial). */
+  payTo?: string;
   /** Optional `extra` block for the 402 (e.g. dynamic pricing estimate). */
   extra?: Record<string, unknown>;
 }
@@ -98,7 +100,7 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
   const env = c.env;
   const network = (env.NETWORK || 'testnet') as 'mainnet' | 'testnet';
   const relayUrl = env.RELAY_URL || (network === 'mainnet' ? 'https://x402-relay.aibtc.com' : 'https://x402-relay.aibtc.dev');
-  const recipient = env.RECIPIENT_ADDRESS;
+  const recipient = config.payTo || env.RECIPIENT_ADDRESS;
   const tokenType = config.tokenType;
   const networkV2 = networkToCAIP2(network);
 

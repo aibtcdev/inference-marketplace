@@ -11,14 +11,20 @@ import type { X402Context, TokenType } from './x402-middleware';
 import { callUpstream, proxyChatCompletion } from './upstream';
 import type { ChatCompletionBody } from './upstream';
 import { getModel, MODELS, DEFAULT_MODEL } from './catalog';
-import { listProviders, getProvider, registerProvider } from './registry';
-import { quotePrice, realizedCostUsd } from './pricing';
+import { getProvider } from './registry';
+import * as directory from './directory';
+import { checkEndpoint, verifyProvider } from './health';
+import { REGISTRATION_SCHEMA } from './schema';
+import { provisionTunnel, deprovisionTunnel, cloudflareConfigured } from './cloudflare';
+import { quotePrice, realizedCostUsd, estimateTokens, usdToBaseUnits } from './pricing';
 import type { Quote } from './pricing';
 
 type Env = {
   RECIPIENT_ADDRESS: string;
   NETWORK: string;
   RELAY_URL: string;
+  /** KV namespace storing the external provider directory. */
+  PROVIDERS: KVNamespace;
   /** Base URL of the OpenAI-compatible upstream (HF Inference Endpoint / vLLM). */
   UPSTREAM_BASE_URL: string;
   /** Bearer token for the upstream (HF token / vLLM api-key). */
@@ -30,6 +36,11 @@ type Env = {
   PRICE_MARKUP?: string;
   /** DEV-ONLY: 'true' bypasses payment on non-mainnet (see x402-middleware). */
   SKIP_PAYMENT?: string;
+  /** Cloudflare tunnel provisioning (optional; enables POST /v1/connect). */
+  CF_API_TOKEN?: string;
+  CF_ACCOUNT_ID?: string;
+  CF_ZONE_ID?: string;
+  CF_PROVIDER_DOMAIN?: string;
 };
 
 type Variables = {
@@ -150,19 +161,10 @@ app.get('/v1/models', async (c) => {
   return c.json({ object: 'list', pricedFor: '1000 output tokens', data });
 });
 
-// Provider registry (supply side). House payout resolves to this deployment's
-// configured recipient. Reputation is read on-chain in Phase 3.
-app.get('/v1/providers', (c) => {
-  const providers = listProviders().map((p) => ({
-    ...p,
-    payoutAddress: p.payoutAddress === 'env:RECIPIENT_ADDRESS'
-      ? (c.env.RECIPIENT_ADDRESS || 'unset')
-      : p.payoutAddress,
-    reputation: p.reputationAgentId === null
-      ? { status: 'bootstrapping', summary: null }
-      : { status: 'live', agentId: p.reputationAgentId, source: 'erc-8004 reputation_get_summary' },
-  }));
-  return c.json({ object: 'list', data: providers });
+// Provider directory (supply side) — external providers registered via the UI.
+app.get('/v1/providers', async (c) => {
+  const data = await directory.listProviders(c.env.PROVIDERS);
+  return c.json({ object: 'list', data });
 });
 
 // ---------------------------------------------------------------------------
@@ -300,31 +302,267 @@ app.post('/v1/chat',
 // Supply side & reputation (Phase 2 / 3 seams)
 // ---------------------------------------------------------------------------
 
-// Register an external compute provider (Phase 2). In-memory for now; pending
-// until a health + first-settlement check promotes it to 'live'.
+// The structured registration contract. Providers host a schema.json matching
+// this; agents validate against it before submitting.
+app.get('/v1/schema', (c) => c.json(REGISTRATION_SCHEMA));
+
+// Register a provider. Accepts either:
+//   - { manifestUrl }            → fetch that schema.json
+//   - { endpoint }               → fetch {endpoint}/schema.json
+//   - inline { name, endpoint, payoutAddress, models[] }  (manual)
+// Then VERIFIES the endpoint is reachable AND actually serves inference before
+// confirming. Unverified endpoints are not listed.
 app.post('/v1/providers', async (c) => {
-  let input: { id?: string; name?: string; payoutAddress?: string; endpoint?: string; reputationAgentId?: number };
+  let body: Record<string, unknown>;
   try {
-    input = await c.req.json();
+    body = await c.req.json();
   } catch {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
-  if (!input.id || !input.name || !input.payoutAddress || !input.endpoint) {
-    return c.json({ error: 'Required: id, name, payoutAddress, endpoint' }, 400);
+
+  // Resolve the registration from a hosted schema.json when possible.
+  let reg = body as unknown as directory.ProviderInput;
+  const explicit = typeof body.manifestUrl === 'string' ? (body.manifestUrl as string) : null;
+  const derived = !explicit && typeof body.endpoint === 'string' && !body.models
+    ? `${(body.endpoint as string).replace(/\/$/, '')}/schema.json`
+    : null;
+  const manifestUrl = explicit || derived;
+  if (manifestUrl) {
+    try {
+      const mr = await fetch(manifestUrl, { signal: AbortSignal.timeout(8000) });
+      if (mr.ok) {
+        const manifest = (await mr.json()) as Record<string, unknown>;
+        reg = { ...manifest, endpoint: (manifest.endpoint as string) || (body.endpoint as string) } as unknown as directory.ProviderInput;
+      } else if (explicit) {
+        return c.json({ error: `Couldn't fetch schema.json (HTTP ${mr.status})` }, 400);
+      }
+    } catch (e) {
+      if (explicit) return c.json({ error: `Couldn't fetch schema.json: ${e instanceof Error ? e.message : String(e)}` }, 400);
+    }
   }
+
+  // Validate + store (status pending).
+  let provider;
   try {
-    const provider = registerProvider({
-      id: input.id,
-      name: input.name,
-      payoutAddress: input.payoutAddress,
-      endpoint: input.endpoint,
-      reputationAgentId: input.reputationAgentId,
-    });
-    return c.json({ registered: provider, note: 'Status pending until health + settlement check (Phase 2).' }, 201);
+    provider = await directory.registerProvider(c.env.PROVIDERS, reg);
   } catch (e) {
-    return c.json({ error: String(e instanceof Error ? e.message : e) }, 400);
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
+
+  // Gate: verify reachable AND functional before confirming (using the shared
+  // key if the endpoint is secured). Roll back if not.
+  const v = await verifyProvider(provider.endpoint, reg.apiKey);
+  if (!v.ok) {
+    await directory.removeProvider(c.env.PROVIDERS, provider.id);
+    return c.json({ error: v.error, reachable: v.reachable, functional: v.functional }, 400);
+  }
+  const updated = await directory.setHealth(c.env.PROVIDERS, provider.id, v.health);
+  return c.json(
+    { provider: updated ?? provider, verification: { reachable: true, functional: true, servedModel: v.servedModel, sample: v.sample } },
+    201,
+  );
+});
+
+// Re-run the health check for one provider on demand.
+app.post('/v1/providers/:id/check', async (c) => {
+  const id = c.req.param('id');
+  const provider = await directory.getProvider(c.env.PROVIDERS, id);
+  if (!provider) return c.json({ error: 'Provider not found' }, 404);
+  const health = await checkEndpoint(provider.endpoint);
+  const updated = await directory.setHealth(c.env.PROVIDERS, id, health);
+  return c.json({ provider: updated });
+});
+
+// Remove a provider (operator/self-service) — also tears down its tunnel.
+app.delete('/v1/providers/:id', async (c) => {
+  const id = c.req.param('id');
+  const tunnelId = await c.env.PROVIDERS.get(`tunnel:${id}`);
+  const ok = await directory.removeProvider(c.env.PROVIDERS, id);
+  if (tunnelId) { await deprovisionTunnel(c.env, tunnelId); await c.env.PROVIDERS.delete(`tunnel:${id}`); }
+  return c.json({ removed: ok }, ok ? 200 : 404);
+});
+
+// One-click connect: provision a Cloudflare tunnel for the provider's LOCAL
+// model and return a single command to run. No Cloudflare account on their side.
+const PROXY_PORT = 8799;
+
+app.post('/v1/connect', async (c) => {
+  if (!cloudflareConfigured(c.env)) {
+    return c.json({ error: 'Tunnel provisioning is not configured on this gateway.' }, 501);
+  }
+  let body: { name?: string; payoutAddress?: string; models?: Array<string | { id: string }>; port?: number };
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+  const port = Number(body.port) || 11434;
+
+  const subId = crypto.randomUUID().slice(0, 10);
+  const key = (crypto.randomUUID() + crypto.randomUUID()).replace(/-/g, '');
+
+  let prov;
+  try {
+    prov = await provisionTunnel(c.env, { subId, servicePort: PROXY_PORT });
+  } catch (e) {
+    return c.json({ error: `Provisioning failed: ${e instanceof Error ? e.message : String(e)}` }, 502);
+  }
+
+  // Register as pending + secured. Goes live once the provider runs the command
+  // and the next health check reaches it.
+  let provider;
+  try {
+    provider = await directory.registerProvider(c.env.PROVIDERS, {
+      name: body.name ?? `provider-${subId}`,
+      endpoint: `https://${prov.hostname}/v1`,
+      payoutAddress: body.payoutAddress ?? '',
+      models: body.models ?? [],
+      apiKey: key,
+    });
+  } catch (e) {
+    await deprovisionTunnel(c.env, prov.tunnelId);
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
+  await c.env.PROVIDERS.put(`tunnel:${provider.id}`, prov.tunnelId);
+
+  const origin = new URL(c.req.url).origin;
+  const command = `KEY=${key} TOKEN=${prov.token} PORT=${port} bash <(curl -fsSL ${origin}/agent.sh)`;
+  return c.json({ providerId: provider.id, hostname: prov.hostname, command });
+});
+
+// The provider agent: starts a keyed auth proxy in front of the local model,
+// then runs the Cloudflare connector. Self-contained (no repo checkout needed).
+const AGENT_SH = `#!/usr/bin/env bash
+set -euo pipefail
+[ -z "\${KEY:-}" ] && { echo "KEY required"; exit 1; }
+[ -z "\${TOKEN:-}" ] && { echo "TOKEN required"; exit 1; }
+PORT="\${PORT:-11434}"; PROXY_PORT="\${PROXY_PORT:-8799}"
+command -v cloudflared >/dev/null 2>&1 || { command -v brew >/dev/null 2>&1 && brew install cloudflared || { echo "Install cloudflared first"; exit 1; }; }
+cat > /tmp/mkt-proxy.mjs <<'PROXY'
+import {createServer,request} from 'node:http';
+const KEY=process.env.PROXY_KEY,UP=new URL(process.env.UPSTREAM);
+createServer((req,res)=>{
+  if((req.headers.authorization||'')!=='Bearer '+KEY){res.writeHead(401);res.end('{"error":"unauthorized"}');return;}
+  const h=Object.assign({},req.headers,{host:UP.host}); delete h.authorization;
+  const up=request({hostname:UP.hostname,port:UP.port||80,path:req.url,method:req.method,headers:h},function(u){res.writeHead(u.statusCode||502,u.headers);u.pipe(res);});
+  up.on('error',function(e){res.writeHead(502);res.end(String(e));}); req.pipe(up);
+}).listen(Number(process.env.PROXY_PORT||8799));
+PROXY
+PROXY_KEY="$KEY" PROXY_PORT="$PROXY_PORT" UPSTREAM="http://localhost:$PORT" node /tmp/mkt-proxy.mjs &
+PROXY_PID=$!
+trap 'kill $PROXY_PID 2>/dev/null' EXIT
+echo "Secured proxy up. Connecting to the marketplace…"
+cloudflared tunnel run --token "$TOKEN"
+`;
+
+app.get('/agent.sh', (c) => c.text(AGENT_SH, 200, { 'Content-Type': 'text/x-shellscript' }));
+
+// Test console: proxy a chat completion to a provider's endpoint so anyone can
+// try it from the UI (server-side call avoids browser CORS). Auto-discovers the
+// provider's served model name. If the provider is x402-gated it returns 402.
+app.post('/v1/providers/:id/test', async (c) => {
+  const provider = await directory.getProvider(c.env.PROVIDERS, c.req.param('id'));
+  if (!provider) return c.json({ error: 'Provider not found' }, 404);
+
+  let body: { prompt?: string; model?: string; max_tokens?: number } = {};
+  try { body = await c.req.json(); } catch { /* defaults */ }
+  const prompt = body.prompt?.trim() || 'In one sentence, what is Bitcoin?';
+
+  const key = (await directory.getProviderKey(c.env.PROVIDERS, provider.id)) ?? '';
+  const auth: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {};
+
+  // Discover the served model name (e.g. "qwen2.5:7b") from the provider's /models.
+  let model = body.model;
+  if (!model) {
+    try {
+      const mr = await fetch(`${provider.endpoint}/models`, { headers: auth, signal: AbortSignal.timeout(8000) });
+      const md = (await mr.json()) as { data?: Array<{ id?: string }> };
+      model = md?.data?.[0]?.id || provider.models[0]?.id;
+    } catch {
+      model = provider.models[0]?.id;
+    }
+  }
+
+  const started = Date.now();
+  try {
+    const r = await fetch(`${provider.endpoint}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...auth },
+      body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], max_tokens: body.max_tokens ?? 256 }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const latencyMs = Date.now() - started;
+    const j = (await r.json().catch(() => ({}))) as {
+      choices?: Array<{ message?: { content?: string } }>;
+      usage?: unknown;
+      error?: unknown;
+    };
+    if (r.status === 402) return c.json({ error: 'This provider requires x402 payment to run inference.', paymentRequired: true, model, latencyMs });
+    if (!r.ok) return c.json({ error: typeof j.error === 'string' ? j.error : `provider returned HTTP ${r.status}`, model, latencyMs });
+    return c.json({ model, content: j.choices?.[0]?.message?.content ?? '', usage: j.usage ?? null, latencyMs });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e), model, latencyMs: Date.now() - started });
   }
 });
+
+// PAID routing proxy. A client pays here; the gateway settles the x402 payment
+// DIRECTLY to the provider's wallet (payTo = provider.payoutAddress, non-
+// custodial), then forwards the request to the provider's endpoint. This is how
+// a bare provider gets monetized without running x402 themselves.
+const DEFAULT_PRICE_PER_MTOK_USD = 0.20;
+
+app.post('/v1/route/:id/chat/completions',
+  x402DynamicMiddleware(async (c, tokenType: TokenType) => {
+    const provider = await directory.getProvider(c.env.PROVIDERS, c.req.param('id') ?? '');
+    if (!provider) return c.json({ error: 'Provider not found' }, 404);
+    if (provider.status === 'down') return c.json({ error: 'Provider is currently down' }, 503);
+
+    let body: ChatCompletionBody;
+    try { body = await c.req.json<ChatCompletionBody>(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
+
+    const model = provider.models.find((m) => m.id === body.model) || provider.models[0];
+    if (!model) return c.json({ error: 'Provider serves no models' }, 400);
+
+    // Price = provider's declared per-token rate × estimated tokens. The client
+    // pays the provider directly; the marketplace takes no custody.
+    const pricePerMTok = model.pricePerMTokenUsd ?? DEFAULT_PRICE_PER_MTOK_USD;
+    const estTokens = estimateTokens(promptTextOf(body)) + (body.max_tokens ?? 512);
+    const usd = (estTokens / 1_000_000) * pricePerMTok;
+    const amount = await usdToBaseUnits(usd, tokenType);
+
+    return {
+      amount,
+      tokenType,
+      payTo: provider.payoutAddress,
+      extra: { pricing: { type: 'dynamic', estimate: { model: model.id, provider: provider.id, estimatedCostUsd: usd.toFixed(6) } } },
+    };
+  }),
+  async (c) => {
+    const provider = await directory.getProvider(c.env.PROVIDERS, c.req.param('id'));
+    if (!provider) return c.json({ error: 'Provider not found' }, 404);
+    const payment = c.get('x402');
+    const body = await c.req.json<ChatCompletionBody>();
+
+    // Forward with the provider's shared key (only the gateway holds it).
+    const key = (await directory.getProviderKey(c.env.PROVIDERS, provider.id)) ?? '';
+
+    // Map the requested model id to the provider's actual served model name.
+    let upstreamModel = body.model;
+    try {
+      const mr = await fetch(`${provider.endpoint}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(8000) });
+      const md = (await mr.json()) as { data?: Array<{ id?: string }> };
+      upstreamModel = md?.data?.[0]?.id || body.model;
+    } catch { /* keep requested model */ }
+
+    const upstream = await proxyChatCompletion(provider.endpoint, key, { ...body, model: upstreamModel });
+    const upstreamObj = (typeof upstream.json === 'object' && upstream.json) ? upstream.json as Record<string, unknown> : {};
+
+    return c.json({
+      ...upstreamObj,
+      _marketplace: {
+        provider: provider.id,
+        paidTo: provider.payoutAddress,
+        payment: { txId: payment?.settleResult?.transaction, payer: payment?.payerAddress },
+      },
+    }, upstream.status as 200);
+  },
+);
 
 // Submit reputation feedback for a provider (Phase 3). On-chain via the
 // ERC-8004 reputation registry. Documented here as the integration point.
@@ -336,4 +574,19 @@ app.post('/v1/feedback', async (c) => {
   }, 501);
 });
 
-export default app;
+// Continuous monitoring: re-check every provider's endpoint on the cron
+// schedule (see wrangler.jsonc triggers), updating live/degraded/down status.
+async function scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+  ctx.waitUntil((async () => {
+    const providers = await directory.listProviders(env.PROVIDERS);
+    await Promise.all(
+      providers.map(async (p) => {
+        const key = p.secured ? await directory.getProviderKey(env.PROVIDERS, p.id) : undefined;
+        const health = await checkEndpoint(p.endpoint, key);
+        await directory.setHealth(env.PROVIDERS, p.id, health);
+      }),
+    );
+  })());
+}
+
+export default { fetch: app.fetch, scheduled };
