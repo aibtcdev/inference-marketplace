@@ -344,7 +344,7 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
 
   return (
     <div className="overlay-in fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm sm:p-6" onClick={onClose}>
-      <div className="modal-in flex h-[90vh] w-[90vw] flex-col overflow-hidden rounded-2xl border border-[#23262d] bg-[#101216] shadow-2xl" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+      <div className="modal-in flex max-h-[90vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-[#23262d] bg-[#101216] shadow-2xl" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <div className="flex shrink-0 items-start justify-between border-b border-[#23262d] px-5 py-4 sm:px-6">
           <div>
             <h2 className="wide text-lg">List your model</h2>
@@ -354,7 +354,7 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6">
-          <div className="mx-auto w-full max-w-2xl">
+          <div className="w-full">
         <div className="flex gap-1 rounded-lg border border-[#23262d] bg-[#0b0d10] p-1 text-sm">
           {(["local", "public"] as const).map((t) => (
             <button key={t} onClick={() => setTab(t)} className={`flex-1 rounded-md py-1.5 ${tab === t ? "bg-[#15181d] text-[#f2f4f7]" : "text-[#9aa3af]"}`}>
