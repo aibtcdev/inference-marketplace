@@ -369,10 +369,18 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
 
   const inputCls = "w-full rounded-lg border border-[#23262d] bg-[#0b0d10] px-3 py-2.5 text-sm outline-none placeholder:text-[#5b626c] focus:border-[#f7931a]";
   const gw = typeof window !== "undefined" ? window.location.origin : GATEWAY;
-  const cmd = `curl -fsSL ${gw}/connect.sh | NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "Qwen/Qwen2.5-7B-Instruct"} PORT=${lf.port || "11434"} GATEWAY=${gw} bash`;
+  // Build commands from real values only — never leak SP.../placeholder model into
+  // a paste. Normalize the model list (trim each id, drop blanks) so stray spaces
+  // can't sneak in. Commands stay hidden until name + wallet + model are filled.
+  const name = lf.name.trim();
+  const wallet = lf.payoutAddress.trim();
+  const port = lf.port.trim() || "11434";
+  const models = lf.models.split(",").map((m) => m.trim()).filter(Boolean).join(",");
+  const ready = !!(name && wallet && models);
+  const cmd = `curl -fsSL ${gw}/connect.sh | NAME=${JSON.stringify(name)} WALLET=${wallet} MODELS=${JSON.stringify(models)} PORT=${port} GATEWAY=${gw} bash`;
   const host = lf.host.trim() || "node.yourdomain.com";
   const tunnel = (lf.host.trim().split(".")[0] || "my-node").replace(/[^a-z0-9-]/gi, "-");
-  const permaCmd = `cloudflared tunnel login\ncloudflared tunnel create ${tunnel}\ncloudflared tunnel route dns ${tunnel} ${host}\n\nTUNNEL=${tunnel} HOST=${host} \\\n  NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "Qwen/Qwen2.5-7B-Instruct"} PORT=${lf.port || "11434"} GATEWAY=${gw} \\\n  ./connect.sh`;
+  const permaCmd = `cloudflared tunnel login\ncloudflared tunnel create ${tunnel}\ncloudflared tunnel route dns ${tunnel} ${host}\n\nTUNNEL=${tunnel} HOST=${host} \\\n  NAME=${JSON.stringify(name)} WALLET=${wallet} MODELS=${JSON.stringify(models)} PORT=${port} GATEWAY=${gw} \\\n  ./connect.sh`;
 
   return (
     <div className="overlay-in fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm sm:p-6" onClick={onClose}>
@@ -412,7 +420,11 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
             <p className="mb-2 mt-1 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 2.</span> Pick one and run it in your terminal — it secures your model behind a key, tunnels it, and registers it. No submit here: the command does it.</p>
 
             <p className="mb-1.5 mt-3 text-[11px] uppercase tracking-wide text-[#5b626c]">Option A · quick (temporary URL)</p>
-            <Snippet label="one command — secures · tunnels · registers" code={cmd} />
+            {ready ? (
+              <Snippet label="one command — secures · tunnels · registers" code={cmd} />
+            ) : (
+              <div className="rounded-lg border border-dashed border-[#2a2e36] bg-[#0b0d10] px-3 py-3 text-xs text-[#5b626c]">Fill name, wallet &amp; model above — your command appears here.</div>
+            )}
             <p className="mt-1.5 rounded-md border border-[#ffbf2e]/25 bg-[#ffbf2e]/[0.06] px-2.5 py-2 text-[11px] text-[#9aa3af]">
               ⚠️ <span className="text-[#ffbf2e]">Temporary</span> — the URL changes on restart, ~200 concurrent max. Fine for a demo; use Option B for a real node.
             </p>
@@ -422,7 +434,11 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
               <span className="mb-1.5 block text-xs text-[#9aa3af]">Your hostname (a subdomain on a domain in your Cloudflare account)</span>
               <input value={lf.host} onChange={(e) => setLf({ ...lf, host: e.target.value })} placeholder="qwen.aibtc.com" className={inputCls} />
             </label>
-            <Snippet label="one-time setup, then run connect.sh with TUNNEL= HOST=" code={permaCmd} />
+            {ready ? (
+              <Snippet label="one-time setup, then run connect.sh with TUNNEL= HOST=" code={permaCmd} />
+            ) : (
+              <div className="rounded-lg border border-dashed border-[#2a2e36] bg-[#0b0d10] px-3 py-3 text-xs text-[#5b626c]">Fill name, wallet &amp; model above — your command appears here.</div>
+            )}
 
             <div className="mt-5 border-t border-[#23262d] pt-4">
               <p className="mb-2 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 3.</span> Whichever you ran, keep it running — then watch for your node to appear:</p>
