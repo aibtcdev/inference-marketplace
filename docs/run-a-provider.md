@@ -13,7 +13,7 @@ One command. No Cloudflare account, no domain.
 
 ```bash
 curl -fsSL https://<gateway>/connect.sh | \
-  NAME="My node" WALLET=SP... MODELS=qwen2.5-7b PORT=11434 GATEWAY=https://<gateway> bash
+  NAME="My node" WALLET=SP... MODELS=Qwen/Qwen2.5-7B-Instruct PORT=11434 GATEWAY=https://<gateway> bash
 ```
 
 What it does: starts a keyed proxy in front of your model → opens an anonymous
@@ -51,7 +51,7 @@ cloudflared tunnel route dns my-node node.yourdomain.com
 
 ```bash
 TUNNEL=my-node HOST=node.yourdomain.com \
-  NAME="My node" WALLET=SP... MODELS=qwen2.5-7b PORT=11434 GATEWAY=https://<gateway> \
+  NAME="My node" WALLET=SP... MODELS=Qwen/Qwen2.5-7B-Instruct PORT=11434 GATEWAY=https://<gateway> \
   ./connect.sh
 ```
 
@@ -75,7 +75,7 @@ list it.
 
 ## Notes
 
-- **Models** are the ids agents request (e.g. `qwen2.5-7b`). Use ids from the
+- **Models** are the ids agents request (e.g. `Qwen/Qwen2.5-7B-Instruct`). Use ids from the
   catalog so clients find you.
 - **Payout wallet** (`SP…`) is where sBTC lands — payment settles to you directly.
 - The marketplace **never manages your tunnel** and **never sees your model

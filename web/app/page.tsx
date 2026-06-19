@@ -340,7 +340,7 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
 
   const inputCls = "w-full rounded-lg border border-[#23262d] bg-[#0b0d10] px-3 py-2.5 text-sm outline-none placeholder:text-[#5b626c] focus:border-[#f7931a]";
   const gw = typeof window !== "undefined" ? window.location.origin : GATEWAY;
-  const cmd = `curl -fsSL ${gw}/connect.sh | NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "qwen2.5-7b"} PORT=${lf.port || "11434"} GATEWAY=${gw} bash`;
+  const cmd = `curl -fsSL ${gw}/connect.sh | NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "Qwen/Qwen2.5-7B-Instruct"} PORT=${lf.port || "11434"} GATEWAY=${gw} bash`;
 
   return (
     <div className="overlay-in fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm" onClick={onClose}>
@@ -366,7 +366,7 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
             {[
               { k: "name" as const, label: "Display name", ph: "Alice's Qwen node" },
               { k: "payoutAddress" as const, label: "Payout wallet", ph: "SP…" },
-              { k: "models" as const, label: "Model ids (comma-separated)", ph: "qwen2.5-7b" },
+              { k: "models" as const, label: "Hugging Face model ids (comma-separated)", ph: "Qwen/Qwen2.5-7B-Instruct" },
               { k: "port" as const, label: "Local model port", ph: "11434" },
             ].map((f) => (
               <label key={f.k} className="mb-3 block">
@@ -383,7 +383,7 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
             <p className="mb-2 mt-3 text-xs text-[#9aa3af]">Permanent (named tunnel on your Cloudflare account):</p>
             <Snippet
               label="one-time setup, then run connect.sh with TUNNEL= HOST="
-              code={`cloudflared tunnel login\ncloudflared tunnel create my-node\ncloudflared tunnel route dns my-node node.yourdomain.com\n\nTUNNEL=my-node HOST=node.yourdomain.com \\\n  NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "qwen2.5-7b"} PORT=${lf.port || "11434"} GATEWAY=${gw} \\\n  ./connect.sh`}
+              code={`cloudflared tunnel login\ncloudflared tunnel create my-node\ncloudflared tunnel route dns my-node node.yourdomain.com\n\nTUNNEL=my-node HOST=node.yourdomain.com \\\n  NAME=${JSON.stringify(lf.name || "My node")} WALLET=${lf.payoutAddress || "SP..."} MODELS=${lf.models || "Qwen/Qwen2.5-7B-Instruct"} PORT=${lf.port || "11434"} GATEWAY=${gw} \\\n  ./connect.sh`}
             />
           </div>
         ) : (

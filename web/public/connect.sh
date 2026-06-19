@@ -6,9 +6,9 @@
 # registers it. Only the marketplace can call it (no bypass). Keep running to
 # stay online; Ctrl+C goes offline.
 #
-#   curl -fsSL https://<gateway>/connect.sh | NAME="My node" WALLET=SP... MODELS=qwen2.5-7b GATEWAY=https://<gateway> bash
+#   curl -fsSL https://<gateway>/connect.sh | NAME="My node" WALLET=SP... MODELS=Qwen/Qwen2.5-7B-Instruct GATEWAY=https://<gateway> bash
 #   # or, from a checkout:
-#   NAME="My node" WALLET=SP... MODELS=qwen2.5-7b ./connect.sh
+#   NAME="My node" WALLET=SP... MODELS=Qwen/Qwen2.5-7B-Instruct ./connect.sh
 #
 set -euo pipefail
 
@@ -22,7 +22,7 @@ MODELS="${MODELS:-}"
 ask() { local v; read -r -p "$1" v; printf '%s' "$v"; }
 [ -z "$NAME" ]   && NAME="$(ask 'Provider name: ')"
 [ -z "$WALLET" ] && WALLET="$(ask 'Payout wallet (SP...): ')"
-[ -z "$MODELS" ] && MODELS="$(ask 'Model ids (comma-separated): ')"
+[ -z "$MODELS" ] && MODELS="$(ask 'HF model ids (e.g. Qwen/Qwen2.5-7B-Instruct): ')"
 
 command -v cloudflared >/dev/null 2>&1 || {
   echo "→ Installing cloudflared…"

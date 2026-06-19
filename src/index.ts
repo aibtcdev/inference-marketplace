@@ -15,6 +15,7 @@ import { getProvider } from './registry';
 import * as directory from './directory';
 import { checkEndpoint, verifyProvider } from './health';
 import { REGISTRATION_SCHEMA } from './schema';
+import { validateHfModel } from './hf';
 import { quotePrice, realizedCostUsd, estimateTokens, usdToBaseUnits } from './pricing';
 import type { Quote } from './pricing';
 
@@ -334,6 +335,14 @@ app.post('/v1/providers', async (c) => {
       if (explicit) return c.json({ error: `Couldn't fetch schema.json: ${e instanceof Error ? e.message : String(e)}` }, 400);
     }
   }
+
+  // Validate every model id against Hugging Face (real + text-generation +
+  // commercial license). Rejects made-up names and non-commercial weights.
+  const modelIds = (reg.models ?? []).map((m) => (typeof m === 'string' ? m : m.id)).filter(Boolean);
+  if (modelIds.length === 0) return c.json({ error: 'at least one model id is required' }, 400);
+  const hfChecks = await Promise.all(modelIds.map((id) => validateHfModel(id)));
+  const badModel = hfChecks.find((r) => !r.valid);
+  if (badModel) return c.json({ error: badModel.error }, 400);
 
   // Validate + store (status pending). Allow http://localhost only off mainnet.
   reg.allowLocal = (c.env.NETWORK || 'testnet') !== 'mainnet';
