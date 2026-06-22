@@ -16,8 +16,9 @@ import * as directory from './directory';
 import { checkEndpoint, verifyProvider } from './health';
 import { REGISTRATION_SCHEMA } from './schema';
 import { validateHfModel } from './hf';
-import { quotePrice, realizedCostUsd, estimateTokens, usdToBaseUnits } from './pricing';
+import { quotePrice, realizedCostUsd, estimateTokens, usdToBaseUnits, getBtcUsd } from './pricing';
 import type { Quote } from './pricing';
+import { renderSkillMd } from './skill';
 
 type Env = {
   RECIPIENT_ADDRESS: string;
@@ -38,10 +39,20 @@ type Env = {
   SKIP_PAYMENT?: string;
 };
 
+/** Where a /v1/chat/completions request was resolved to, decided in the pricing
+ *  middleware and consumed by the handler after settlement. */
+type CompletionRoute =
+  | { kind: 'house' }
+  | { kind: 'community'; providerId: string; modelId: string };
+
 type Variables = {
   x402?: X402Context;
   quote?: Quote;
+  route?: CompletionRoute;
 };
+
+/** Default per-token rate for a registered provider that declares none. */
+const DEFAULT_PRICE_PER_MTOK_USD = 0.20;
 
 function markupFrom(env: Env): number | undefined {
   const m = Number(env.PRICE_MARKUP);
@@ -53,6 +64,43 @@ function promptTextOf(body: ChatCompletionBody): string {
   return (body.messages ?? [])
     .map((m) => (typeof m.content === 'string' ? m.content : ''))
     .join(' ');
+}
+
+/**
+ * Forward an already-paid chat completion to a registered provider's endpoint,
+ * using the shared key only the gateway holds, and attach the marketplace
+ * receipt. Shared by the catalog endpoint (community models) and the
+ * /v1/route/:id proxy so both behave identically. Payment has already settled
+ * directly to the provider (non-custodial) before this runs.
+ */
+async function routeToProvider(
+  c: Context<{ Bindings: Env; Variables: Variables }>,
+  provider: directory.Provider,
+  body: ChatCompletionBody,
+  payment: X402Context | undefined,
+): Promise<Response> {
+  const key = (await directory.getProviderKey(c.env.PROVIDERS, provider.id)) ?? '';
+
+  // Map the requested model id to the provider's actual served model name.
+  let upstreamModel = body.model;
+  try {
+    const mr = await fetch(`${provider.endpoint}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(8000) });
+    const md = (await mr.json()) as { data?: Array<{ id?: string }> };
+    upstreamModel = md?.data?.[0]?.id || body.model;
+  } catch { /* keep requested model */ }
+
+  const upstream = await proxyChatCompletion(provider.endpoint, key, { ...body, model: upstreamModel });
+  const upstreamObj = (typeof upstream.json === 'object' && upstream.json) ? upstream.json as Record<string, unknown> : {};
+
+  return c.json({
+    ...upstreamObj,
+    _marketplace: {
+      model: body.model,
+      provider: provider.id,
+      paidTo: provider.payoutAddress,
+      payment: { txId: payment?.settleResult?.transaction, payer: payment?.payerAddress },
+    },
+  }, upstream.status as 200);
 }
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -107,6 +155,7 @@ app.get('/', (c) => {
       flow: 'Request -> 402 requirements -> sign (no broadcast) -> retry with X-PAYMENT -> settle via relay -> inference',
     },
     endpoints: {
+      skill: 'GET /skill.md  (agent skill manifest — read this first)',
       models: 'GET /v1/models',
       providers: 'GET /v1/providers',
       chatCompletions: 'POST /v1/chat/completions  (OpenAI-compatible, dynamic price by model)',
@@ -119,6 +168,22 @@ app.get('/', (c) => {
 
 app.get('/health', (c) => {
   return c.json({ status: 'ok', timestamp: new Date().toISOString(), network: c.env.NETWORK || 'testnet' });
+});
+
+// Agent skill manifest (markdown). A single document an agent can fetch and act
+// on in one step — pay-per-inference + provider onboarding — generated from the
+// live catalog so it never drifts.
+app.get('/skill.md', async (c) => {
+  const providers = await directory.listProviders(c.env.PROVIDERS);
+  const md = renderSkillMd({
+    origin: new URL(c.req.url).origin,
+    network: c.env.NETWORK || 'testnet',
+    providers,
+    defaultPricePerMTok: DEFAULT_PRICE_PER_MTOK_USD,
+  });
+  c.header('Content-Type', 'text/markdown; charset=utf-8');
+  c.header('Cache-Control', 'public, max-age=60');
+  return c.body(md);
 });
 
 // Model catalog with LIVE, dynamic pricing. Each model is priced for a
@@ -142,6 +207,7 @@ app.get('/v1/models', async (c) => {
         tier: m.tier,
         contextLength: m.contextLength,
         providerId: m.providerId,
+        source: 'house',
         bestFor: m.bestFor,
         // reference price for ~1k output tokens
         referencePrice: {
@@ -153,7 +219,31 @@ app.get('/v1/models', async (c) => {
       };
     }),
   );
-  return c.json({ object: 'list', pricedFor: '1000 output tokens', data });
+
+  // Community models — every live registered provider's declared models, priced
+  // at their per-token rate. Callable via /v1/chat/completions (model id) or
+  // the explicit /v1/route/:id proxy; payment settles to the provider directly.
+  const providers = (await directory.listProviders(c.env.PROVIDERS)).filter((p) => p.status !== 'down');
+  const btcUsd = await getBtcUsd();
+  const community = [];
+  for (const p of providers) {
+    for (const m of p.models) {
+      const usd = (1000 / 1_000_000) * (m.pricePerMTokenUsd ?? DEFAULT_PRICE_PER_MTOK_USD);
+      community.push({
+        id: m.id,
+        name: m.name ?? m.id,
+        contextLength: m.contextLength ?? null,
+        capabilities: m.capabilities ?? [],
+        providerId: p.id,
+        source: 'community',
+        status: p.status,
+        route: `/v1/route/${p.id}/chat/completions`,
+        referencePrice: { usd: Number(usd.toFixed(6)), sats: await usdToBaseUnits(usd, 'sBTC'), btcUsd },
+      });
+    }
+  }
+
+  return c.json({ object: 'list', pricedFor: '1000 output tokens', data: [...data, ...community] });
 });
 
 // Provider directory (supply side) — external providers registered via the UI.
@@ -179,55 +269,76 @@ app.post('/v1/chat/completions',
     } catch {
       return c.json({ error: 'Invalid JSON body' }, 400);
     }
-    const model = getModel(body.model);
-    if (!model) {
+
+    // 1) House catalog model — priced by serving cost × markup, paid to the house.
+    const houseModel = getModel(body.model);
+    if (houseModel) {
+      const quote = await quotePrice({
+        modelId: houseModel.id,
+        costPer1kUsd: houseModel.costPer1kUsd,
+        promptText: promptTextOf(body),
+        maxTokens: body.max_tokens ?? 1024,
+        tokenType,
+        markup: markupFrom(c.env),
+      });
+      c.set('quote', quote);
+      c.set('route', { kind: 'house' });
+      return {
+        amount: quote.amount,
+        tokenType,
+        extra: {
+          pricing: {
+            type: 'dynamic',
+            estimate: { model: houseModel.id, estimatedCostUsd: quote.priceUsd.toFixed(6) },
+          },
+        },
+      };
+    }
+
+    // 2) Community model — served by a registered provider. The client pays the
+    //    provider directly (non-custodial) at the provider's declared rate.
+    const providers = await directory.listProviders(c.env.PROVIDERS);
+    const provider = providers.find((p) => p.status === 'live' && p.models.some((m) => m.id === body.model));
+    const model = provider?.models.find((m) => m.id === body.model);
+    if (!provider || !model) {
       return c.json({
         error: `Unknown model: ${body.model ?? '(none)'}`,
         hint: 'GET /v1/models for the catalog',
       }, 400);
     }
-    // Dynamic quote: serving cost x markup, converted to the token at the live rate.
-    const quote = await quotePrice({
-      modelId: model.id,
-      costPer1kUsd: model.costPer1kUsd,
-      promptText: promptTextOf(body),
-      maxTokens: body.max_tokens ?? 1024,
-      tokenType,
-      markup: markupFrom(c.env),
-    });
-    c.set('quote', quote);
+    const pricePerMTok = model.pricePerMTokenUsd ?? DEFAULT_PRICE_PER_MTOK_USD;
+    const estTokens = estimateTokens(promptTextOf(body)) + (body.max_tokens ?? 512);
+    const usd = (estTokens / 1_000_000) * pricePerMTok;
+    const amount = await usdToBaseUnits(usd, tokenType);
+    c.set('route', { kind: 'community', providerId: provider.id, modelId: model.id });
     return {
-      amount: quote.amount,
+      amount,
       tokenType,
-      extra: {
-        pricing: {
-          type: 'dynamic',
-          estimate: { model: model.id, estimatedCostUsd: quote.priceUsd.toFixed(6) },
-        },
-      },
+      payTo: provider.payoutAddress,
+      extra: { pricing: { type: 'dynamic', estimate: { model: model.id, provider: provider.id, estimatedCostUsd: usd.toFixed(6) } } },
     };
   }),
   async (c) => {
     const payment = c.get('x402');
     const body = await c.req.json<ChatCompletionBody>();
+    const route = c.get('route');
+
+    // Community provider -> forward to their endpoint (already paid to them).
+    if (route?.kind === 'community') {
+      const provider = await directory.getProvider(c.env.PROVIDERS, route.providerId);
+      if (!provider || provider.status === 'down') {
+        return c.json({ error: `No live provider for model ${body.model}` }, 503);
+      }
+      return routeToProvider(c, provider, body, payment);
+    }
+
+    // House provider -> our OpenAI-compatible upstream (HF endpoint / vLLM).
     const model = getModel(body.model)!; // validated in middleware
     const provider = getProvider(model.providerId);
-
     if (!provider || provider.status !== 'live') {
       return c.json({ error: `No live provider for model ${model.id}` }, 503);
     }
 
-    // Phase 2: external providers serve their own x402 endpoint; the gateway
-    // forwards and settles to their payout address. Not yet enabled.
-    if (provider.kind === 'external') {
-      return c.json({
-        error: 'External provider routing not enabled yet (Phase 2)',
-        provider: provider.id,
-        endpoint: provider.endpoint,
-      }, 501);
-    }
-
-    // House provider -> our OpenAI-compatible upstream (HF endpoint / vLLM).
     const upstream = await proxyChatCompletion(
       c.env.UPSTREAM_BASE_URL,
       c.env.UPSTREAM_API_KEY,
@@ -436,8 +547,6 @@ app.post('/v1/providers/:id/test', async (c) => {
 // DIRECTLY to the provider's wallet (payTo = provider.payoutAddress, non-
 // custodial), then forwards the request to the provider's endpoint. This is how
 // a bare provider gets monetized without running x402 themselves.
-const DEFAULT_PRICE_PER_MTOK_USD = 0.20;
-
 app.post('/v1/route/:id/chat/completions',
   x402DynamicMiddleware(async (c, tokenType: TokenType) => {
     const provider = await directory.getProvider(c.env.PROVIDERS, c.req.param('id') ?? '');
@@ -467,31 +576,8 @@ app.post('/v1/route/:id/chat/completions',
   async (c) => {
     const provider = await directory.getProvider(c.env.PROVIDERS, c.req.param('id'));
     if (!provider) return c.json({ error: 'Provider not found' }, 404);
-    const payment = c.get('x402');
     const body = await c.req.json<ChatCompletionBody>();
-
-    // Forward with the provider's shared key (only the gateway holds it).
-    const key = (await directory.getProviderKey(c.env.PROVIDERS, provider.id)) ?? '';
-
-    // Map the requested model id to the provider's actual served model name.
-    let upstreamModel = body.model;
-    try {
-      const mr = await fetch(`${provider.endpoint}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(8000) });
-      const md = (await mr.json()) as { data?: Array<{ id?: string }> };
-      upstreamModel = md?.data?.[0]?.id || body.model;
-    } catch { /* keep requested model */ }
-
-    const upstream = await proxyChatCompletion(provider.endpoint, key, { ...body, model: upstreamModel });
-    const upstreamObj = (typeof upstream.json === 'object' && upstream.json) ? upstream.json as Record<string, unknown> : {};
-
-    return c.json({
-      ...upstreamObj,
-      _marketplace: {
-        provider: provider.id,
-        paidTo: provider.payoutAddress,
-        payment: { txId: payment?.settleResult?.transaction, payer: payment?.payerAddress },
-      },
-    }, upstream.status as 200);
+    return routeToProvider(c, provider, body, c.get('x402'));
   },
 );
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 
 // Same-origin in production (the Worker serves both UI and API); override via
 // NEXT_PUBLIC_GATEWAY_URL for split local dev (next dev + wrangler dev).
@@ -327,6 +328,9 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
   const [lf, setLf] = useState({ name: "", payoutAddress: "", models: "", port: "11434", host: "" });
   const [src, setSrc] = useState("");
   const [pubKey, setPubKey] = useState("");
+  // Inline fields for an already-public endpoint (skipped when a schema.json URL
+  // is pasted — the manifest carries name/wallet/models itself).
+  const [pf, setPf] = useState({ name: "", payoutAddress: "", models: "" });
 
   // After the user runs the connect command on their machine, the script
   // registers itself — so we poll the directory and confirm the moment the
@@ -365,6 +369,30 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
       else setResult({ ok: false, msg: j.error || "Couldn't verify that endpoint." });
     } catch { setResult({ ok: false, msg: "Gateway unreachable." }); }
     finally { setBusy(false); }
+  }
+
+  // A schema.json URL self-describes; a bare endpoint needs name/wallet/models
+  // supplied inline. We send the inline fields verbatim — the gateway validates
+  // the models against Hugging Face and verifies the endpoint before listing.
+  const pubIsManifest = src.trim().endsWith(".json");
+  const pubReady = !!src.trim() && (pubIsManifest || !!(pf.name.trim() && pf.payoutAddress.trim() && pf.models.trim()));
+
+  function submitPublic(e: FormEvent) {
+    e.preventDefault();
+    const url = src.trim();
+    const apiKey = pubKey.trim() || undefined;
+    if (pubIsManifest) {
+      sendPublic({ manifestUrl: url, ...(apiKey ? { apiKey } : {}) });
+      return;
+    }
+    const models = pf.models.split(",").map((m) => m.trim()).filter(Boolean);
+    sendPublic({
+      name: pf.name.trim(),
+      endpoint: url,
+      payoutAddress: pf.payoutAddress.trim(),
+      models,
+      ...(apiKey ? { apiKey } : {}),
+    });
   }
 
   const inputCls = "w-full rounded-lg border border-[#23262d] bg-[#0b0d10] px-3 py-2.5 text-sm outline-none placeholder:text-[#5b626c] focus:border-[#f7931a]";
@@ -462,17 +490,39 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
             </div>
           </div>
         ) : (
-          <form onSubmit={(e) => { e.preventDefault(); const base = src.trim().endsWith(".json") ? { manifestUrl: src.trim() } : { endpoint: src.trim() }; sendPublic(pubKey.trim() ? { ...base, apiKey: pubKey.trim() } : base); }} className="mt-4">
+          <form onSubmit={submitPublic} className="mt-4">
             <label className="block">
               <span className="mb-1.5 block text-xs text-[#9aa3af]">Public endpoint or schema.json URL</span>
               <input required value={src} onChange={(e) => setSrc(e.target.value)} placeholder="https://your-host/v1" className={inputCls} />
             </label>
+
+            {pubIsManifest ? (
+              <p className="mt-2 rounded-md border border-[#23262d] bg-[#0b0d10] px-2.5 py-2 text-[11px] text-[#9aa3af]">
+                We&apos;ll read name, wallet &amp; models from your <span className="mono text-[#cfd5dd]">schema.json</span>.
+              </p>
+            ) : (
+              <>
+                <label className="mt-3 block">
+                  <span className="mb-1.5 block text-xs text-[#9aa3af]">Display name</span>
+                  <input value={pf.name} onChange={(e) => setPf({ ...pf, name: e.target.value })} placeholder="Alice's Qwen node" className={inputCls} />
+                </label>
+                <label className="mt-3 block">
+                  <span className="mb-1.5 block text-xs text-[#9aa3af]">Payout wallet</span>
+                  <input value={pf.payoutAddress} onChange={(e) => setPf({ ...pf, payoutAddress: e.target.value })} placeholder="SP…" className={inputCls} />
+                </label>
+                <label className="mt-3 block">
+                  <span className="mb-1.5 block text-xs text-[#9aa3af]">Hugging Face model ids (comma-separated)</span>
+                  <input value={pf.models} onChange={(e) => setPf({ ...pf, models: e.target.value })} placeholder="Qwen/Qwen2.5-7B-Instruct" className={inputCls} />
+                </label>
+              </>
+            )}
+
             <label className="mt-3 block">
               <span className="mb-1.5 block text-xs text-[#9aa3af]">API key (optional — if your endpoint requires one)</span>
               <input value={pubKey} onChange={(e) => setPubKey(e.target.value)} placeholder="leave blank if open" className={inputCls} />
             </label>
-            <p className="mt-2 text-xs text-[#9aa3af]">Already on a server? Paste the URL — we verify and list it.</p>
-            <button disabled={busy} className="mt-4 w-full rounded-lg bg-[#f7931a] py-3 text-sm font-medium text-[#1a1206] transition-opacity hover:opacity-90 disabled:opacity-60">{busy ? "Verifying…" : "Register & verify"}</button>
+            <p className="mt-2 text-xs text-[#9aa3af]">Paste your endpoint — we verify it&apos;s reachable + serving inference, then list it and wrap it in x402.</p>
+            <button disabled={busy || !pubReady} className="mt-4 w-full rounded-lg bg-[#f7931a] py-3 text-sm font-medium text-[#1a1206] transition-opacity hover:opacity-90 disabled:opacity-60">{busy ? "Verifying…" : "Register & verify"}</button>
           </form>
         )}
 

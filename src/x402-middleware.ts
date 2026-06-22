@@ -62,7 +62,7 @@ const TOKEN_CONTRACTS: Record<'mainnet' | 'testnet', Record<'sBTC' | 'USDCx', To
 };
 
 // Bindings are `any` so these helpers compose with any app Env.
-type Ctx = Context<{ Bindings: any; Variables: { x402?: X402Context; quote?: unknown } }>;
+type Ctx = Context<{ Bindings: any; Variables: { x402?: X402Context; quote?: unknown; route?: unknown } }>;
 
 function encodeB64Json(obj: unknown): string {
   const json = JSON.stringify(obj, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
