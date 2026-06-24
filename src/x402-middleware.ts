@@ -166,14 +166,47 @@ async function settleViaLegionRoute(c: Ctx, cfg: LegionRouteCfg): Promise<Respon
     return c.json(required, 402);
   }
 
-  // ---- replay guard --------------------------------------------------------
+  // ---- credit ledger: ONE on-chain top-up funds MANY off-chain calls --------
+  // The only on-chain event is the top-up `route` (treasury skims 8%, provider
+  // paid 92% upfront — non-custodial). Per-call metering is off-chain in KV, so
+  // no gas / no Stacks tx per inference. This is what makes the rail usable.
   const kv = env.PROVIDERS as { get(k: string): Promise<string | null>; put(k: string, v: string, o?: { expirationTtl?: number }): Promise<void> } | undefined;
-  const redeemedKey = `redeemed:${txid}`;
-  if (kv && (await kv.get(redeemedKey))) {
-    return c.json({ error: 'Payment receipt already redeemed', code: 'RECEIPT_REPLAY', txid }, 402);
+  const creditKey = `credit:${txid}`;
+  const openedKey = `opened:${txid}`;
+  const creditTtl = Number(env.LEGION_CREDIT_TTL || 86400); // seconds (24h)
+  const now = Date.now();
+
+  const accept = (payer: string, remaining: bigint) => {
+    c.set('x402', {
+      payerAddress: payer,
+      settleResult: { success: true, transaction: txid, network: cfg.networkV2, payer },
+    });
+    c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeB64Json({ success: true, transaction: txid, scheme: 'legion-route', payer, creditRemaining: remaining.toString() }));
+    c.header('X-PAYER-ADDRESS', payer);
+    c.header('X-LEGION-CREDIT-REMAINING', remaining.toString());
+    return null;
+  };
+
+  // Existing credit → meter off-chain, zero Stacks calls.
+  if (kv) {
+    const raw = await kv.get(creditKey);
+    if (raw) {
+      const cr = JSON.parse(raw);
+      if (now > cr.expiresAt) return c.json({ error: 'Credit expired — top up again', code: 'CREDIT_EXPIRED', txid }, 402);
+      const remaining = BigInt(cr.remaining);
+      if (remaining < quoted) return c.json({ error: 'Credit exhausted — top up again', code: 'CREDIT_EXHAUSTED', txid, remaining: cr.remaining, callPrice: quoted.toString() }, 402);
+      const left = remaining - quoted;
+      cr.remaining = left.toString();
+      await kv.put(creditKey, JSON.stringify(cr), { expirationTtl: creditTtl });
+      return accept(cr.payer, left);
+    }
+    // Credit lifetime already used → never re-open from the same txid (anti-replay after TTL).
+    if (await kv.get(openedKey)) {
+      return c.json({ error: 'Receipt already consumed — top up again', code: 'RECEIPT_REPLAY', txid }, 402);
+    }
   }
 
-  // ---- verify the route tx on-chain ----------------------------------------
+  // ---- new top-up: verify the route tx on-chain (once) ----------------------
   let tx: any;
   try {
     const r = await fetch(`${stacksApiBase(env, cfg.network)}/extended/v1/tx/${txid}`);
@@ -216,17 +249,16 @@ async function settleViaLegionRoute(c: Ctx, cfg: LegionRouteCfg): Promise<Respon
   if (toArg !== cfg.recipient) return fail('wrong recipient', { got: toArg, want: cfg.recipient });
   if (amountArg === null || amountArg < quoted) return fail('underpaid', { got: amountArg?.toString(), want: quoted.toString() });
 
-  // ---- accept: mark redeemed + attach payment context ----------------------
-  if (kv) await kv.put(redeemedKey, JSON.stringify({ at: tx.burn_block_time_iso ?? null, amount: amountArg.toString() }), { expirationTtl: 60 * 60 * 24 * 30 });
-
+  // ---- accept: open an off-chain credit funded by this one top-up -----------
+  // remaining = full routed amount minus this first call. Later calls draw down
+  // the same credit with no further on-chain tx.
   const payer = tx.sender_address || 'unknown';
-  c.set('x402', {
-    payerAddress: payer,
-    settleResult: { success: true, transaction: txid, network: cfg.networkV2, payer },
-  });
-  c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeB64Json({ success: true, transaction: txid, scheme: 'legion-route', payer }));
-  c.header('X-PAYER-ADDRESS', payer);
-  return null;
+  const remaining = amountArg - quoted;
+  if (kv) {
+    await kv.put(openedKey, '1', { expirationTtl: 60 * 60 * 24 * 30 });
+    await kv.put(creditKey, JSON.stringify({ payer, provider: cfg.recipient, remaining: remaining.toString(), total: amountArg.toString(), expiresAt: now + creditTtl * 1000 }), { expirationTtl: creditTtl });
+  }
+  return accept(payer, remaining);
 }
 
 /**
