@@ -140,16 +140,32 @@ the client's chosen token at the live spot rate, so your USD price stays stable.
 
 ---
 
+## Enforcement & trust
+
+How bad providers are handled, so you can trust the catalog:
+
+- **Who enforces:** the **marketplace operator**. A provider can be **flagged**, which
+  de-routes it everywhere and removes it from the catalog. Today this is a **manual operator
+  action** via an admin-gated endpoint — there is **no automatic cheat-detection yet**, so a
+  provider is flagged only when the operator acts on a complaint or review.
+- **Transparency:** a provider's \`flagged\` status (and \`flagReason\`) is **public** in
+  \`GET /v1/providers\`. A flagged provider never serves traffic.
+- **You can report, not flag:** reporting a suspect provider signals the operator; only the
+  operator turns a report into a flag. Flagging is **not** a crowd action.
+- **Roadmap:** the flag decision is planned to move on-chain to a stake-weighted
+  \`legion-gov\` vote (the legion decides, not the operator).
+
 ## Endpoints
 | Method | Path | Cost | Purpose |
 |--------|------|------|---------|
 | GET | \`/\` | free | Service + payment info |
 | GET | \`/skill.md\` | free | This document |
 | GET | \`/v1/models\` | free | Live catalog (house + community) |
-| GET | \`/v1/providers\` | free | Registered providers + health |
+| GET | \`/v1/providers\` | free | Registered providers + health + \`flagged\` status |
 | GET | \`/v1/schema\` | free | Provider registration JSON Schema |
 | POST | \`/v1/chat/completions\` | **paid** | OpenAI-compatible; price by model + tokens |
 | POST | \`/v1/route/{id}/chat/completions\` | **paid** | Call a specific provider; settles to them |
 | POST | \`/v1/providers\` | free | Register a provider (verified before listing) |
+| POST | \`/v1/providers/{id}/flag\` | free | **Operator only** (admin token): flag/unflag a provider (de-route) |
 `;
 }

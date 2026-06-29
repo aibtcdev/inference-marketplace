@@ -63,7 +63,25 @@ ollama serve & ollama pull qwen2.5:7b
 | POST | `/v1/chat/completions` | **dynamic** | OpenAI-compatible; price by model + tokens |
 | POST | `/v1/chat` | fixed | Simple `{prompt}` demo, default model |
 | POST | `/v1/providers` | free | Register an external provider (Phase 2) |
+| POST | `/v1/providers/{id}/flag` | free | **Operator only** (admin token): flag/unflag a provider |
 | POST | `/v1/feedback` | free | Submit reputation (Phase 3) |
+
+## Enforcement & trust
+
+Be explicit about how bad providers are handled, so the catalog can be trusted:
+
+- **Who enforces:** the **marketplace operator**. A provider can be **flagged**, which
+  de-routes it everywhere and drops it from the catalog. Flagging is a **manual operator
+  action** via `POST /v1/providers/{id}/flag`, gated by `ADMIN_TOKEN` (the `X-Admin-Token`
+  header). It is **not** a key/multisig and **not** a crowd vote — it is the operator.
+- **No auto-detection yet:** there is no automatic cheat-detection. A provider is flagged
+  only when the operator acts on a complaint or manual review. Agents/users can *report*; only
+  the operator can *flag*.
+- **Transparency:** `flagged` + `flagReason` are public on `GET /v1/providers`. A flagged
+  provider never serves traffic and is excluded from routing and the catalog.
+- **Mainnet safety:** the flag endpoint is disabled on mainnet unless `ADMIN_TOKEN` is set.
+- **Roadmap:** move the flag decision on-chain to a stake-weighted `legion-gov` vote (the
+  legion decides, not the operator).
 
 ## Pricing (dynamic, two axes)
 

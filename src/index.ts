@@ -173,7 +173,14 @@ app.get('/', (c) => {
       chatCompletions: 'POST /v1/chat/completions  (OpenAI-compatible, dynamic price by model)',
       chat: 'POST /v1/chat  (simple prompt, cheap tier)',
       registerProvider: 'POST /v1/providers  (Phase 2)',
+      flagProvider: 'POST /v1/providers/{id}/flag  (operator only, admin token)',
       feedback: 'POST /v1/feedback  (Phase 3, reputation)',
+    },
+    trust: {
+      enforcedBy: 'operator',
+      model: 'A provider can be flagged (de-routed everywhere, removed from catalog) by the marketplace operator via an admin-token-gated endpoint. This is a manual action; there is no automatic cheat-detection yet. Agents/users can report a provider, but only the operator can flag.',
+      flaggedStatusPublic: "GET /v1/providers exposes each provider's `flagged` and `flagReason`",
+      roadmap: 'flag decision moving on-chain to a stake-weighted legion-gov vote',
     },
   });
 });
