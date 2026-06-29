@@ -30,8 +30,12 @@
         // Legion fee-rail settlement (testnet). Non-secret config; UPSTREAM_* +
         // (optionally) RECIPIENT_ADDRESS are still set via `wrangler secret put`.
         "STACKS_API": "https://api.testnet.hiro.so",
-        "LEGION_FEES": "STBEMQQVSS3K3SQTF2NRZMF82JHMNTHQKQ2J7DW5.legion-fees",
-        "LEGION_TREASURY": "STBEMQQVSS3K3SQTF2NRZMF82JHMNTHQKQ2J7DW5.legion-treasury",
+        // v1 provider-Legion guild bundle (legion-agent-06). Settlement skims 8%
+        // into this treasury; LEGION_ENGAGE is the optional engagement-stake
+        // contract the gateway reads to rank higher-staked providers first.
+        "LEGION_FEES": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-fees",
+        "LEGION_TREASURY": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-treasury",
+        "LEGION_ENGAGE": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-engage",
         "LEGION_SBTC": "STV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RJ5XDY2.sbtc-token",
         "LEGION_MIN_AMOUNT": "1250",
         "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
