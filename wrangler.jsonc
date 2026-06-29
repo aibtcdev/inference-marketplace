@@ -26,7 +26,15 @@
       "vars": {
         "NETWORK": "testnet",
         "RELAY_URL": "https://x402-relay.aibtc.dev",
-        "PRICE_MARKUP": "1.5"
+        "PRICE_MARKUP": "1.5",
+        // Legion fee-rail settlement (testnet). Non-secret config; UPSTREAM_* +
+        // (optionally) RECIPIENT_ADDRESS are still set via `wrangler secret put`.
+        "STACKS_API": "https://api.testnet.hiro.so",
+        "LEGION_FEES": "STBEMQQVSS3K3SQTF2NRZMF82JHMNTHQKQ2J7DW5.legion-fees",
+        "LEGION_TREASURY": "STBEMQQVSS3K3SQTF2NRZMF82JHMNTHQKQ2J7DW5.legion-treasury",
+        "LEGION_SBTC": "STV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RJ5XDY2.sbtc-token",
+        "LEGION_MIN_AMOUNT": "1250",
+        "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
       },
       "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
       "triggers": { "crons": ["*/5 * * * *"] }
