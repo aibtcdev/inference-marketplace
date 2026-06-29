@@ -34,6 +34,12 @@ export interface Provider {
   health: HealthResult | null;
   /** Marketplace status, derived from health. */
   status: 'pending' | 'live' | 'degraded' | 'down';
+  /** Flagged by the marketplace (cheating / abuse). Orthogonal to health: a
+   *  flagged provider is de-routed regardless of health, and stays flagged
+   *  across health checks until explicitly cleared. */
+  flagged?: boolean;
+  /** Why it was flagged + when (for the audit trail / UI). */
+  flagReason?: string;
   /** ERC-8004 reputation (Phase 3). null until it has feedback. */
   reputation: { agentId: number; score?: number } | null;
   registeredAt: string;
@@ -118,7 +124,10 @@ export async function registerProvider(kv: KV, input: ProviderInput): Promise<Pr
 
   if (!name) throw new Error('name is required (set it in schema.json or the form)');
   assertSafeEndpoint(endpoint, input.allowLocal ?? false); // SSRF guard
-  if (!/^S[PM][0-9A-Z]+$/.test(payoutAddress)) throw new Error('payoutAddress must be a mainnet Stacks address (SP… / SM…)');
+  // Basic hygiene only: a Stacks address on either network (mainnet SP/SM,
+  // testnet ST/SN). Not a security check — the bond gate requires this to be a
+  // real bonded principal and settlement verifies the actual on-chain txid.
+  if (!/^S[PMTN][0-9A-Z]+$/.test(payoutAddress)) throw new Error('payoutAddress must be a Stacks address (SP/SM mainnet, ST/SN testnet)');
   if (!models.length) throw new Error('at least one model (with an id) is required');
 
   const providers = await listProviders(kv);
@@ -157,6 +166,24 @@ export async function setHealth(kv: KV, id: string, health: HealthResult): Promi
   if (!p) return undefined;
   p.health = health;
   p.status = health.status;
+  await saveAll(kv, providers);
+  return p;
+}
+
+/** Flag (or clear) a provider. A flagged provider is de-routed regardless of
+ *  health; clearing restores it to normal routing. Enforcement lives here, not
+ *  in the inference plane. */
+export async function setFlag(kv: KV, id: string, flagged: boolean, reason?: string): Promise<Provider | undefined> {
+  const providers = await listProviders(kv);
+  const p = providers.find((x) => x.id === id);
+  if (!p) return undefined;
+  if (flagged) {
+    p.flagged = true;
+    if (reason) p.flagReason = reason;
+  } else {
+    delete p.flagged;
+    delete p.flagReason;
+  }
   await saveAll(kv, providers);
   return p;
 }

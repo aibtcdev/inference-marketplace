@@ -13,6 +13,7 @@ import type { ChatCompletionBody } from './upstream';
 import { getModel, MODELS, DEFAULT_MODEL } from './catalog';
 import { getProvider } from './registry';
 import * as directory from './directory';
+import { rankByStake } from './legion';
 import { checkEndpoint, verifyProvider } from './health';
 import { REGISTRATION_SCHEMA } from './schema';
 import { validateHfModel } from './hf';
@@ -37,6 +38,17 @@ type Env = {
   PRICE_MARKUP?: string;
   /** DEV-ONLY: 'true' bypasses payment on non-mainnet (see x402-middleware). */
   SKIP_PAYMENT?: string;
+  /** Legion engagement-stake contract ("ADDR.legion-engage"). When set, the
+   *  gateway reads each community provider's stake from it and ranks
+   *  higher-staked providers first. Optional: staking is not required to earn,
+   *  it only buys ranking. Unset → no stake ranking (registration order). */
+  LEGION_ENGAGE?: string;
+  /** Seconds to cache a provider's read stake. Default 60; 0 disables. */
+  LEGION_STAKE_CACHE_TTL?: string;
+  /** Shared secret for marketplace enforcement actions (flagging). Sent as the
+   *  X-Admin-Token header. On mainnet the flag endpoint is disabled unless this
+   *  is set; off mainnet it is open for testing. */
+  ADMIN_TOKEN?: string;
 };
 
 /** Where a /v1/chat/completions request was resolved to, decided in the pricing
@@ -223,7 +235,10 @@ app.get('/v1/models', async (c) => {
   // Community models — every live registered provider's declared models, priced
   // at their per-token rate. Callable via /v1/chat/completions (model id) or
   // the explicit /v1/route/:id proxy; payment settles to the provider directly.
-  const providers = (await directory.listProviders(c.env.PROVIDERS)).filter((p) => p.status !== 'down');
+  // Exclude flagged + down providers, then rank by stake so higher-staked
+  // providers list first (staking buys ranking; it is never required to earn).
+  const liveProviders = (await directory.listProviders(c.env.PROVIDERS)).filter((p) => p.status !== 'down' && !p.flagged);
+  const providers = await rankByStake(c.env, liveProviders);
   const btcUsd = await getBtcUsd();
   const community = [];
   for (const p of providers) {
@@ -297,8 +312,13 @@ app.post('/v1/chat/completions',
 
     // 2) Community model — served by a registered provider. The client pays the
     //    provider directly (non-custodial) at the provider's declared rate.
+    //    Exclude flagged providers, then pick the highest-staked one for the model
+    //    (staking buys ranking; it is never required to earn).
     const providers = await directory.listProviders(c.env.PROVIDERS);
-    const provider = providers.find((p) => p.status === 'live' && p.models.some((m) => m.id === body.model));
+    const candidates = providers.filter(
+      (p) => p.status === 'live' && !p.flagged && p.models.some((m) => m.id === body.model),
+    );
+    const provider = (await rankByStake(c.env, candidates))[0];
     const model = provider?.models.find((m) => m.id === body.model);
     if (!provider || !model) {
       return c.json({
@@ -326,7 +346,7 @@ app.post('/v1/chat/completions',
     // Community provider -> forward to their endpoint (already paid to them).
     if (route?.kind === 'community') {
       const provider = await directory.getProvider(c.env.PROVIDERS, route.providerId);
-      if (!provider || provider.status === 'down') {
+      if (!provider || provider.status === 'down' || provider.flagged) {
         return c.json({ error: `No live provider for model ${body.model}` }, 503);
       }
       return routeToProvider(c, provider, body, payment);
@@ -492,6 +512,27 @@ app.post('/v1/providers/:id/check', async (c) => {
 app.delete('/v1/providers/:id', async (c) => {
   const ok = await directory.removeProvider(c.env.PROVIDERS, c.req.param('id'));
   return c.json({ removed: ok }, ok ? 200 : 404);
+});
+
+// Flag / unflag a provider (marketplace enforcement). A flagged provider is
+// de-routed everywhere regardless of health, until cleared. Body:
+//   { "flagged": true|false, "reason": "..." }   (flagged defaults to true)
+// Gated by ADMIN_TOKEN (X-Admin-Token header) when set; disabled on mainnet
+// unless ADMIN_TOKEN is configured. This is the enforcement lever; it lives in
+// the gateway, not the inference plane.
+app.post('/v1/providers/:id/flag', async (c) => {
+  const admin = c.env.ADMIN_TOKEN;
+  const network = c.env.NETWORK || 'testnet';
+  if (admin) {
+    if (c.req.header('X-Admin-Token') !== admin) return c.json({ error: 'unauthorized' }, 401);
+  } else if (network === 'mainnet') {
+    return c.json({ error: 'flag endpoint requires ADMIN_TOKEN on mainnet' }, 503);
+  }
+  const body = await c.req.json<{ flagged?: boolean; reason?: string }>().catch(() => ({} as { flagged?: boolean; reason?: string }));
+  const flagged = body.flagged !== false; // default true
+  const updated = await directory.setFlag(c.env.PROVIDERS, c.req.param('id'), flagged, body.reason);
+  if (!updated) return c.json({ error: 'Provider not found' }, 404);
+  return c.json({ provider: updated, flagged });
 });
 
 
