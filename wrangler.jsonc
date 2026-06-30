@@ -9,10 +9,22 @@
   // Requests matching a built asset are served directly; everything else runs
   // the Worker (so /v1/*, /health hit Hono).
   "assets": { "directory": "./web/out" },
+  // Default deploy serves the v1 Legion marketplace on TESTNET (inference.aibtc.com).
+  // Real sBTC stays off until more providers, visible payouts, and audits — see PR.
   "vars": {
-    "NETWORK": "mainnet",
-    "RELAY_URL": "https://x402-relay.aibtc.com",
-    "PRICE_MARKUP": "1.5"
+    "NETWORK": "testnet",
+    "RELAY_URL": "https://x402-relay.aibtc.dev",
+    "PRICE_MARKUP": "1.5",
+    "STACKS_API": "https://api.testnet.hiro.so",
+    // v1 provider-Legion guild bundle (legion-agent-06). Settlement skims 8%
+    // into this treasury; LEGION_ENGAGE is the optional engagement-stake
+    // contract the gateway reads to rank higher-staked providers first.
+    "LEGION_FEES": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-fees",
+    "LEGION_TREASURY": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-treasury",
+    "LEGION_ENGAGE": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-engage",
+    "LEGION_SBTC": "STV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RJ5XDY2.sbtc-token",
+    "LEGION_MIN_AMOUNT": "1250",
+    "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
   },
   // Create with: wrangler kv namespace create PROVIDERS  → paste the id below.
   "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
@@ -47,10 +59,19 @@
       "name": "gateway",
       "workers_dev": false,
       "assets": { "directory": "./web/out" },
+      // Production now runs the v1 Legion marketplace on TESTNET (mirrors the
+      // default vars above). Flip these back to mainnet to re-enable real sBTC.
       "vars": {
-        "NETWORK": "mainnet",
-        "RELAY_URL": "https://x402-relay.aibtc.com",
-        "PRICE_MARKUP": "1.5"
+        "NETWORK": "testnet",
+        "RELAY_URL": "https://x402-relay.aibtc.dev",
+        "PRICE_MARKUP": "1.5",
+        "STACKS_API": "https://api.testnet.hiro.so",
+        "LEGION_FEES": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-fees",
+        "LEGION_TREASURY": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-treasury",
+        "LEGION_ENGAGE": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-engage",
+        "LEGION_SBTC": "STV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RJ5XDY2.sbtc-token",
+        "LEGION_MIN_AMOUNT": "1250",
+        "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
       },
       "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
       "triggers": { "crons": ["*/5 * * * *"] }
