@@ -14,6 +14,7 @@ import { getModel, MODELS, DEFAULT_MODEL } from './catalog';
 import { getProvider } from './registry';
 import * as directory from './directory';
 import { rankByStake } from './legion';
+import { legionForModel } from './model-legions';
 import { checkEndpoint, verifyProvider } from './health';
 import { REGISTRATION_SCHEMA } from './schema';
 import { validateHfModel } from './hf';
@@ -38,10 +39,16 @@ type Env = {
   PRICE_MARKUP?: string;
   /** DEV-ONLY: 'true' bypasses payment on non-mainnet (see x402-middleware). */
   SKIP_PAYMENT?: string;
-  /** Legion engagement-stake contract ("ADDR.legion-engage"). When set, the
-   *  gateway reads each community provider's stake from it and ranks
-   *  higher-staked providers first. Optional: staking is not required to earn,
-   *  it only buys ranking. Unset → no stake ranking (registration order). */
+  /** Owner address of the per-model legions (e.g. "STGX5YP…"). Each model family
+   *  has its own contracts named `legion-{treasury,fees,gov}-<family>` under this
+   *  one owner. When set, fee routing + stake ranking resolve per model (a Qwen
+   *  call's 8% → legion-treasury-qwen, ranked by legion-gov-qwen). See
+   *  src/model-legions.ts. Unset → legacy single-legion via LEGION_FEES/ENGAGE. */
+  LEGION_OWNER?: string;
+  /** Legion engagement-stake contract ("ADDR.legion-engage"). LEGACY fallback for
+   *  models that don't map to a per-model legion: gateway reads each community
+   *  provider's stake from it and ranks higher-staked providers first. Optional:
+   *  staking is not required to earn, it only buys ranking. */
   LEGION_ENGAGE?: string;
   /** Seconds to cache a provider's read stake. Default 60; 0 disables. */
   LEGION_STAKE_CACHE_TTL?: string;
@@ -61,6 +68,8 @@ type Variables = {
   x402?: X402Context;
   quote?: Quote;
   route?: CompletionRoute;
+  /** Per-model legion (fees/treasury/gov) resolved for fee routing. */
+  legion?: import('./model-legions').ModelLegion;
 };
 
 /** Default per-token rate for a registered provider that declares none. */
@@ -305,6 +314,8 @@ app.post('/v1/chat/completions',
       });
       c.set('quote', quote);
       c.set('route', { kind: 'house' });
+      // route this model's 8% skim to its model legion (qwen2.5-* -> qwen legion, …)
+      c.set('legion', legionForModel(c.env, houseModel.id) ?? undefined);
       return {
         amount: quote.amount,
         tokenType,
@@ -338,6 +349,8 @@ app.post('/v1/chat/completions',
     const usd = (estTokens / 1_000_000) * pricePerMTok;
     const amount = await usdToBaseUnits(usd, tokenType);
     c.set('route', { kind: 'community', providerId: provider.id, modelId: model.id });
+    // route this model's 8% skim to its model legion
+    c.set('legion', legionForModel(c.env, model.id) ?? undefined);
     return {
       amount,
       tokenType,
