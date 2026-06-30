@@ -28,6 +28,20 @@ const STATUS: Record<string, { c: string; label: string }> = {
   pending: { c: "#6b7280", label: "checking" },
 };
 const trunc = (a: string) => (a && a.length > 16 ? `${a.slice(0, 9)}…${a.slice(-5)}` : a);
+
+// The models we run on-chain legions for. A provider picks one at registration so
+// it maps 1:1 to its legion (fees/treasury/gov). Keep in sync with the gateway's
+// src/model-legions.ts families (qwen/deepseek/glm5/kimi/llama4/mistral/gemma4).
+const SUPPORTED_MODELS: { id: string; label: string }[] = [
+  { id: "Qwen/Qwen2.5-7B-Instruct", label: "Qwen2.5 7B Instruct" },
+  { id: "Qwen/Qwen2.5-32B-Instruct", label: "Qwen2.5 32B Instruct" },
+  { id: "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B", label: "DeepSeek R1 (Distill 32B)" },
+  { id: "zai-org/GLM-5", label: "GLM-5" },
+  { id: "moonshotai/Kimi-K2-Instruct", label: "Kimi K2" },
+  { id: "meta-llama/Llama-4-Scout-17B-16E-Instruct", label: "Llama 4 Scout" },
+  { id: "mistralai/Mistral-Nemo-Instruct-2407", label: "Mistral Nemo" },
+  { id: "google/Gemma-4-9b-it", label: "Gemma 4 9B" },
+];
 // x402 amounts are in BASE UNITS (sBTC: 1 = 1 sat = 1e-8 BTC; USDCx/STX: 1e-6).
 function formatPrice(amount: string, asset: string): string {
   const n = Number(amount);
@@ -437,14 +451,23 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
             {[
               { k: "name" as const, label: "Display name", ph: "Alice's Qwen node" },
               { k: "payoutAddress" as const, label: "Payout wallet", ph: "SP…" },
-              { k: "models" as const, label: "Hugging Face model ids (comma-separated)", ph: "Qwen/Qwen2.5-7B-Instruct" },
-              { k: "port" as const, label: "Local model port", ph: "11434" },
             ].map((f) => (
               <label key={f.k} className="mb-3 block">
                 <span className="mb-1.5 block text-xs text-[#9aa3af]">{f.label}</span>
                 <input value={lf[f.k]} onChange={(e) => setLf({ ...lf, [f.k]: e.target.value })} placeholder={f.ph} className={inputCls} />
               </label>
             ))}
+            <label className="mb-3 block">
+              <span className="mb-1.5 block text-xs text-[#9aa3af]">Supported model</span>
+              <select value={lf.models} onChange={(e) => setLf({ ...lf, models: e.target.value })} className={inputCls}>
+                <option value="">Select a model…</option>
+                {SUPPORTED_MODELS.map((m) => (<option key={m.id} value={m.id}>{m.label}</option>))}
+              </select>
+            </label>
+            <label className="mb-3 block">
+              <span className="mb-1.5 block text-xs text-[#9aa3af]">Local model port</span>
+              <input value={lf.port} onChange={(e) => setLf({ ...lf, port: e.target.value })} placeholder="11434" className={inputCls} />
+            </label>
             <p className="mb-2 mt-1 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 2.</span> Pick one and run it in your terminal — it secures your model behind a key, tunnels it, and registers it. No submit here: the command does it.</p>
 
             <p className="mb-1.5 mt-3 text-[11px] uppercase tracking-wide text-[#5b626c]">Option A · quick (temporary URL)</p>
@@ -511,8 +534,11 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
                   <input value={pf.payoutAddress} onChange={(e) => setPf({ ...pf, payoutAddress: e.target.value })} placeholder="SP…" className={inputCls} />
                 </label>
                 <label className="mt-3 block">
-                  <span className="mb-1.5 block text-xs text-[#9aa3af]">Hugging Face model ids (comma-separated)</span>
-                  <input value={pf.models} onChange={(e) => setPf({ ...pf, models: e.target.value })} placeholder="Qwen/Qwen2.5-7B-Instruct" className={inputCls} />
+                  <span className="mb-1.5 block text-xs text-[#9aa3af]">Supported model</span>
+                  <select value={pf.models} onChange={(e) => setPf({ ...pf, models: e.target.value })} className={inputCls}>
+                    <option value="">Select a model…</option>
+                    {SUPPORTED_MODELS.map((m) => (<option key={m.id} value={m.id}>{m.label}</option>))}
+                  </select>
                 </label>
               </>
             )}

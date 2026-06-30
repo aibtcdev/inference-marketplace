@@ -62,7 +62,7 @@ const TOKEN_CONTRACTS: Record<'mainnet' | 'testnet', Record<'sBTC' | 'USDCx', To
 };
 
 // Bindings are `any` so these helpers compose with any app Env.
-type Ctx = Context<{ Bindings: any; Variables: { x402?: X402Context; quote?: unknown; route?: unknown } }>;
+type Ctx = Context<{ Bindings: any; Variables: { x402?: X402Context; quote?: unknown; route?: unknown; legion?: { fees?: string; treasury?: string; gov?: string } } }>;
 
 function encodeB64Json(obj: unknown): string {
   const json = JSON.stringify(obj, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
@@ -101,6 +101,8 @@ interface LegionRouteCfg {
   recipient: string;    // provider that must receive the 92% leg (route `to`)
   network: 'mainnet' | 'testnet';
   networkV2: string;
+  feeContract?: string; // per-model legion-fees-<family>; falls back to env.LEGION_FEES
+  treasury?: string;    // per-model legion-treasury-<family>; falls back to env.LEGION_TREASURY
 }
 
 function stacksApiBase(env: any, network: 'mainnet' | 'testnet'): string {
@@ -130,8 +132,8 @@ function findArg(args: any[] | undefined, name: string, idx: number): any {
  */
 async function settleViaLegionRoute(c: Ctx, cfg: LegionRouteCfg): Promise<Response | null> {
   const env = c.env;
-  const feeContract: string = env.LEGION_FEES;                 // "ADDR.legion-fees"
-  const treasury: string | undefined = env.LEGION_TREASURY;    // "ADDR.legion-treasury"
+  const feeContract: string = cfg.feeContract || env.LEGION_FEES;          // per-model legion-fees-<family>, else legacy
+  const treasury: string | undefined = cfg.treasury || env.LEGION_TREASURY; // per-model treasury, else legacy
   const token: string = env.LEGION_SBTC;                       // sBTC the rail accepts (Faktory token)
   // route reverts u430 unless 8% rounds to ≥1 base unit; floor the quote so cheap
   // calls still carry a non-zero skim. LEGION_MIN_AMOUNT overrides the default.
@@ -289,8 +291,15 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
   // carry an arbitrary contract-call as X-PAYMENT, so the agent broadcasts the
   // route call itself and we VERIFY the settled txid on-chain. See the gist
   // legion-inference-1.0.md §2.
-  if (env.LEGION_FEES) {
-    return settleViaLegionRoute(c, { amount: config.amount, recipient, network, networkV2 });
+  // Resolve the per-model legion set on the route handler (house/community both
+  // set it). The rail activates when a per-model legion OR the legacy env exists.
+  const ml = (c.get('legion') as { fees?: string; treasury?: string } | undefined);
+  const feeContract = ml?.fees || env.LEGION_FEES;
+  if (feeContract) {
+    return settleViaLegionRoute(c, {
+      amount: config.amount, recipient, network, networkV2,
+      feeContract, treasury: ml?.treasury || env.LEGION_TREASURY,
+    });
   }
 
   const paymentRequirements: PaymentRequirementsV2 = {

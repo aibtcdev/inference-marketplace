@@ -7,6 +7,7 @@
  * must never break routing, so failures degrade to "unstaked" (stake 0).
  */
 import { principalCV, cvToHex, hexToCV, cvToValue } from '@stacks/transactions';
+import { legionForModel } from './model-legions';
 
 type KV =
   | {
@@ -25,8 +26,10 @@ function stacksApiBase(env: any): string {
  * staked / not configured / unreadable. Never throws. Cached in KV for
  * LEGION_STAKE_CACHE_TTL seconds.
  */
-export async function getProviderStake(env: any, principal: string): Promise<bigint> {
-  const contract: string | undefined = env.LEGION_ENGAGE; // "ADDR.legion-engage"
+export async function getProviderStake(env: any, principal: string, govContract?: string): Promise<bigint> {
+  // Per-model gov is the ranking signal (also the legacy single `legion-engage`
+  // env as a fallback). gov + engage both expose `get-stake(principal) -> uint`.
+  const contract: string | undefined = govContract || env.LEGION_ENGAGE;
   if (!contract) return 0n;
   const dot = contract.indexOf('.');
   if (dot < 1 || dot === contract.length - 1) return 0n;
@@ -35,7 +38,8 @@ export async function getProviderStake(env: any, principal: string): Promise<big
 
   const kv = env.PROVIDERS as KV;
   const ttl = Number(env.LEGION_STAKE_CACHE_TTL ?? '60');
-  const cacheKey = `stake:${principal}`;
+  // key by contract too, so different model legions never collide in the cache.
+  const cacheKey = `stake:${name}:${principal}`;
   if (kv && ttl > 0) {
     try {
       const cached = await kv.get(cacheKey);
@@ -74,13 +78,26 @@ export async function getProviderStake(env: any, principal: string): Promise<big
 }
 
 /**
- * Sort providers by on-chain stake (descending). Reads stakes concurrently.
- * Returns a NEW array; ties keep input order (stable). No-op when LEGION_ENGAGE
- * is unset or there's nothing to sort.
+ * Sort providers by on-chain stake (descending). Each provider's stake is read
+ * from the gov of the model it serves (its first declared model resolves the
+ * legion), so a Qwen provider ranks by its Qwen-legion stake. Falls back to the
+ * legacy single `legion-engage` env for models that don't map to a legion.
+ * Returns a NEW array; ties keep input order (stable). No-op when nothing maps
+ * and there's no legacy engage configured.
  */
-export async function rankByStake<T extends { payoutAddress: string }>(env: any, providers: T[]): Promise<T[]> {
-  if (!env.LEGION_ENGAGE || providers.length < 2) return providers;
-  const stakes = await Promise.all(providers.map((p) => getProviderStake(env, p.payoutAddress)));
+export async function rankByStake<T extends { payoutAddress: string; models?: { id: string }[] }>(
+  env: any,
+  providers: T[],
+): Promise<T[]> {
+  if (providers.length < 2) return providers;
+  const govFor = (p: T) => legionForModel(env, p.models?.[0]?.id)?.gov ?? env.LEGION_ENGAGE;
+  if (!providers.some(govFor)) return providers; // nothing to rank by
+  const stakes = await Promise.all(
+    providers.map((p) => {
+      const gov = govFor(p);
+      return gov ? getProviderStake(env, p.payoutAddress, gov) : Promise.resolve(0n);
+    }),
+  );
   return providers
     .map((p, i) => ({ p, stake: stakes[i], i }))
     .sort((a, b) => (b.stake > a.stake ? 1 : b.stake < a.stake ? -1 : a.i - b.i))
