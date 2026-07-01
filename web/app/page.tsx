@@ -92,9 +92,18 @@ export default function Home() {
             <span className="grid h-7 w-7 place-items-center rounded-md bg-[#f7931a] text-[15px] font-bold text-[#1a1206]">⚡</span>
             <span className="wide text-[15px] font-medium tracking-tight">Inference Marketplace</span>
           </div>
-          <button onClick={() => setModal(true)} className="rounded-lg bg-[#f7931a] px-4 py-2 text-[13px] font-medium text-[#1a1206] transition-opacity hover:opacity-90">
-            Register endpoint
-          </button>
+          <div className="flex items-center gap-3">
+            <span
+              title="This marketplace runs on Stacks testnet — endpoints and payments settle in testnet sBTC."
+              className="inline-flex items-center gap-1.5 rounded-full border border-[#3a2f12] bg-[#1a1206] px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider text-[#f7931a]"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-[#f7931a]" />
+              Testnet
+            </span>
+            <button onClick={() => setModal(true)} className="rounded-lg bg-[#f7931a] px-4 py-2 text-[13px] font-medium text-[#1a1206] transition-opacity hover:opacity-90">
+              Register endpoint
+            </button>
+          </div>
         </div>
       </header>
 
