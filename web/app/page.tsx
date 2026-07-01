@@ -102,7 +102,7 @@ export default function Home() {
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-3 sm:px-5 sm:py-3.5">
           <div className="flex items-center gap-2 sm:gap-2.5">
             <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-[#f7931a] text-[15px] font-bold text-[#1a1206]">⚡</span>
-            <span className="wide whitespace-nowrap text-[12px] font-medium tracking-tight sm:text-[15px]">Inference Marketplace</span>
+            <span className="wide hidden whitespace-nowrap text-[15px] font-medium tracking-tight sm:inline">Inference Marketplace</span>
           </div>
           <div className="flex shrink-0 items-center gap-2 sm:gap-3">
             {(() => {
