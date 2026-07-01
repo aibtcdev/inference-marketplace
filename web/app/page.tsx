@@ -97,14 +97,14 @@ export default function Home() {
   }, [providers]);
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen overflow-x-hidden">
       <header className="sticky top-0 z-20 border-b border-[#23262d] bg-[#08090a]/85 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-3.5">
-          <div className="flex items-center gap-2.5">
-            <span className="grid h-7 w-7 place-items-center rounded-md bg-[#f7931a] text-[15px] font-bold text-[#1a1206]">⚡</span>
-            <span className="wide text-[15px] font-medium tracking-tight">Inference Marketplace</span>
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-3 sm:px-5 sm:py-3.5">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-2.5">
+            <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-[#f7931a] text-[15px] font-bold text-[#1a1206]">⚡</span>
+            <span className="wide truncate text-[14px] font-medium tracking-tight sm:text-[15px]">Inference Marketplace</span>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-2 sm:gap-3">
             {(() => {
               const isMain = network === "mainnet";
               return (
@@ -119,8 +119,9 @@ export default function Home() {
                 </span>
               );
             })()}
-            <button onClick={() => setModal(true)} className="rounded-lg bg-[#f7931a] px-4 py-2 text-[13px] font-medium text-[#1a1206] transition-opacity hover:opacity-90">
-              Register endpoint
+            <button onClick={() => setModal(true)} className="shrink-0 rounded-lg bg-[#f7931a] px-3 py-2 text-[13px] font-medium text-[#1a1206] transition-opacity hover:opacity-90 sm:px-4">
+              <span className="sm:hidden">Register</span>
+              <span className="hidden sm:inline">Register endpoint</span>
             </button>
           </div>
         </div>
