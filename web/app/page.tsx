@@ -230,11 +230,27 @@ function Copy({ text }: { text: string }) {
 
 function ProviderDetail({ provider: p, onClose }: { provider: Provider; onClose: () => void }) {
   useEscape(onClose);
-  const st = STATUS[p.status] ?? STATUS.pending;
+  // Recheck this provider the moment the drawer opens, so the status shown is
+  // current rather than up-to-5-min stale from the cron. Falls back to the
+  // last-known status if the probe fails.
+  const [prov, setProv] = useState(p);
+  const [rechecking, setRechecking] = useState(false);
+  const st = STATUS[prov.status] ?? STATUS.pending;
   const modelId = p.models[0]?.id ?? "";
   const [prompt, setPrompt] = useState("In one sentence, what is Bitcoin?");
   const [running, setRunning] = useState(false);
   const [out, setOut] = useState<{ content?: string; latencyMs?: number; error?: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRechecking(true);
+    fetch(`${GATEWAY}/v1/providers/${p.id}/check`, { method: "POST" })
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled && d?.provider) setProv(d.provider); })
+      .catch(() => { /* keep last-known status */ })
+      .finally(() => { if (!cancelled) setRechecking(false); });
+    return () => { cancelled = true; };
+  }, [p.id]);
 
   async function run() {
     setRunning(true); setOut(null);
@@ -289,8 +305,9 @@ function ProviderDetail({ provider: p, onClose }: { provider: Provider; onClose:
               <span className="flex items-center gap-1.5 text-xs">
                 <span className="h-2 w-2 rounded-full" style={{ background: st.c }} />
                 <span style={{ color: st.c }}>{st.label}</span>
-                {p.health?.latencyMs != null && <span className="text-[#9aa3af]">· {p.health.latencyMs}ms</span>}
-                {p.health?.x402 && <span className="text-[#9aa3af]">· x402</span>}
+                {prov.health?.latencyMs != null && <span className="text-[#9aa3af]">· {prov.health.latencyMs}ms</span>}
+                {prov.health?.x402 && <span className="text-[#9aa3af]">· x402</span>}
+                {rechecking && <span className="flex items-center gap-1 text-[#5b626c]"><span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border border-[#5b626c] border-t-transparent" />rechecking…</span>}
               </span>
             </div>
           </div>
@@ -357,7 +374,7 @@ function ProviderDetail({ provider: p, onClose }: { provider: Provider; onClose:
             />
             <div className="mt-2 flex items-center justify-between">
               <span className="mono text-xs text-[#5b626c]">{modelId}</span>
-              <button onClick={run} disabled={running || p.status === "down"} className="rounded-lg bg-[#f7931a] px-4 py-1.5 text-sm font-medium text-[#1a1206] transition-opacity hover:opacity-90 disabled:opacity-50">
+              <button onClick={run} disabled={running || prov.status === "down"} className="rounded-lg bg-[#f7931a] px-4 py-1.5 text-sm font-medium text-[#1a1206] transition-opacity hover:opacity-90 disabled:opacity-50">
                 {running ? "Running…" : "Run"}
               </button>
             </div>
