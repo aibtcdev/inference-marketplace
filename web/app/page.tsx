@@ -439,7 +439,7 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
         <div className="flex shrink-0 items-start justify-between border-b border-[#23262d] px-5 py-4 sm:px-6">
           <div>
             <h2 className="wide text-lg">List your model</h2>
-            <p className="mt-1 text-sm text-[#9aa3af]">Get paid in sBTC for serving inference.</p>
+            <p className="mt-1 text-sm text-[#9aa3af]">Get paid in sBTC for serving inference. You keep <span className="text-[#35c759]">92%</span>.</p>
           </div>
           <button onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-[#9aa3af] hover:bg-[#15181d] hover:text-[#f2f4f7]">✕</button>
         </div>
@@ -453,6 +453,10 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
             </button>
           ))}
         </div>
+
+        <p className="mt-3 rounded-md border border-[#35c759]/25 bg-[#35c759]/[0.06] px-2.5 py-2 text-[11px] leading-relaxed text-[#9aa3af]">
+          <span className="text-[#f2f4f7]">Fee:</span> each paid request settles on-chain, non-custodial — <span className="text-[#35c759]">92% goes straight to your payout wallet</span>, an <span className="text-[#f2f4f7]">8%</span> fee routes to the model&apos;s legion treasury. No listing fee, no fee to join.
+        </p>
 
         {tab === "local" ? (
           <div className="mt-4">

@@ -66,6 +66,15 @@ ollama serve & ollama pull qwen2.5:7b
 | POST | `/v1/providers/{id}/flag` | free | **Operator only** (admin token): flag/unflag a provider |
 | POST | `/v1/feedback` | free | Submit reputation (Phase 3) |
 
+## Fees
+
+**Providers keep 92%.** Registering and earning are free — no listing fee, no
+bond required to earn. Each paid request settles **on-chain and non-custodial**
+through the model's legion fee rail (`legion-fees.route`): **92% → the provider's
+payout wallet**, **8% → the model's legion treasury**. The gateway never
+custodies funds. Cheap calls are floored (`LEGION_MIN_AMOUNT`) so the 8% skim
+always rounds to ≥1 base unit.
+
 ## Enforcement & trust
 
 Be explicit about how bad providers are handled, so the catalog can be trusted:
