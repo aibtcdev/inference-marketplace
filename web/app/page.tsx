@@ -56,6 +56,7 @@ export default function Home() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState<Provider | null>(null);
+  const [network, setNetwork] = useState("testnet");
 
   const load = useCallback(async () => {
     try {
@@ -63,6 +64,15 @@ export default function Home() {
       const d = await r.json();
       setProviders(d.data || []);
     } catch { /* offline */ }
+  }, []);
+
+  // Network (testnet/mainnet) comes from the gateway so the badge can never
+  // drift from what the gateway is actually settling on.
+  useEffect(() => {
+    fetch(`${GATEWAY}/`)
+      .then((r) => r.json())
+      .then((d) => { if (d?.network) setNetwork(String(d.network)); })
+      .catch(() => { /* keep default */ });
   }, []);
 
   useEffect(() => {
@@ -93,13 +103,20 @@ export default function Home() {
             <span className="wide text-[15px] font-medium tracking-tight">Inference Marketplace</span>
           </div>
           <div className="flex items-center gap-3">
-            <span
-              title="This marketplace runs on Stacks testnet — endpoints and payments settle in testnet sBTC."
-              className="inline-flex items-center gap-1.5 rounded-full border border-[#3a2f12] bg-[#1a1206] px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider text-[#f7931a]"
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-[#f7931a]" />
-              Testnet
-            </span>
+            {(() => {
+              const isMain = network === "mainnet";
+              return (
+                <span
+                  title={isMain
+                    ? "This marketplace runs on Stacks mainnet — endpoints and payments settle in real sBTC."
+                    : `This marketplace runs on Stacks ${network} — endpoints and payments settle in ${network} sBTC.`}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider ${isMain ? "border-[#123a1c] bg-[#06140b] text-[#35c759]" : "border-[#3a2f12] bg-[#1a1206] text-[#f7931a]"}`}
+                >
+                  <span className={`h-1.5 w-1.5 rounded-full ${isMain ? "bg-[#35c759]" : "bg-[#f7931a]"}`} />
+                  {network}
+                </span>
+              );
+            })()}
             <button onClick={() => setModal(true)} className="rounded-lg bg-[#f7931a] px-4 py-2 text-[13px] font-medium text-[#1a1206] transition-opacity hover:opacity-90">
               Register endpoint
             </button>
