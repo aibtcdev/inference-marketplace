@@ -3,6 +3,11 @@
 Serve an open model, get paid per request in sBTC. Your endpoint is always kept
 behind a shared key, so only the marketplace can call it (direct calls 401).
 
+> **Fees — you keep 92%.** Registering and joining are free (no listing fee, no
+> bond required to earn). Each paid request settles **on-chain and
+> non-custodial**: **92% goes straight to your payout wallet** and an **8%** fee
+> routes to the model's legion treasury. The marketplace never holds your funds.
+
 Pick the path that fits how your model is hosted.
 
 ---

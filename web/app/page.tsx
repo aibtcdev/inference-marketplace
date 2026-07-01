@@ -56,6 +56,7 @@ export default function Home() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState<Provider | null>(null);
+  const [network, setNetwork] = useState("testnet");
 
   const load = useCallback(async () => {
     try {
@@ -63,6 +64,15 @@ export default function Home() {
       const d = await r.json();
       setProviders(d.data || []);
     } catch { /* offline */ }
+  }, []);
+
+  // Network (testnet/mainnet) comes from the gateway so the badge can never
+  // drift from what the gateway is actually settling on.
+  useEffect(() => {
+    fetch(`${GATEWAY}/`)
+      .then((r) => r.json())
+      .then((d) => { if (d?.network) setNetwork(String(d.network)); })
+      .catch(() => { /* keep default */ });
   }, []);
 
   useEffect(() => {
@@ -92,9 +102,25 @@ export default function Home() {
             <span className="grid h-7 w-7 place-items-center rounded-md bg-[#f7931a] text-[15px] font-bold text-[#1a1206]">⚡</span>
             <span className="wide text-[15px] font-medium tracking-tight">Inference Marketplace</span>
           </div>
-          <button onClick={() => setModal(true)} className="rounded-lg bg-[#f7931a] px-4 py-2 text-[13px] font-medium text-[#1a1206] transition-opacity hover:opacity-90">
-            Register endpoint
-          </button>
+          <div className="flex items-center gap-3">
+            {(() => {
+              const isMain = network === "mainnet";
+              return (
+                <span
+                  title={isMain
+                    ? "This marketplace runs on Stacks mainnet — endpoints and payments settle in real sBTC."
+                    : `This marketplace runs on Stacks ${network} — endpoints and payments settle in ${network} sBTC.`}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider ${isMain ? "border-[#123a1c] bg-[#06140b] text-[#35c759]" : "border-[#3a2f12] bg-[#1a1206] text-[#f7931a]"}`}
+                >
+                  <span className={`h-1.5 w-1.5 rounded-full ${isMain ? "bg-[#35c759]" : "bg-[#f7931a]"}`} />
+                  {network}
+                </span>
+              );
+            })()}
+            <button onClick={() => setModal(true)} className="rounded-lg bg-[#f7931a] px-4 py-2 text-[13px] font-medium text-[#1a1206] transition-opacity hover:opacity-90">
+              Register endpoint
+            </button>
+          </div>
         </div>
       </header>
 
@@ -430,7 +456,7 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
         <div className="flex shrink-0 items-start justify-between border-b border-[#23262d] px-5 py-4 sm:px-6">
           <div>
             <h2 className="wide text-lg">List your model</h2>
-            <p className="mt-1 text-sm text-[#9aa3af]">Get paid in sBTC for serving inference.</p>
+            <p className="mt-1 text-sm text-[#9aa3af]">Get paid in sBTC for serving inference. You keep <span className="text-[#35c759]">92%</span>.</p>
           </div>
           <button onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-[#9aa3af] hover:bg-[#15181d] hover:text-[#f2f4f7]">✕</button>
         </div>
@@ -444,6 +470,10 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
             </button>
           ))}
         </div>
+
+        <p className="mt-3 rounded-md border border-[#35c759]/25 bg-[#35c759]/[0.06] px-2.5 py-2 text-[11px] leading-relaxed text-[#9aa3af]">
+          <span className="text-[#f2f4f7]">Fee:</span> each paid request settles on-chain, non-custodial — <span className="text-[#35c759]">92% goes straight to your payout wallet</span>, an <span className="text-[#f2f4f7]">8%</span> fee routes to the model&apos;s legion treasury. No listing fee, no fee to join.
+        </p>
 
         {tab === "local" ? (
           <div className="mt-4">

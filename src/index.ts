@@ -175,6 +175,13 @@ app.get('/', (c) => {
       tokenTypeHeader: 'X-PAYMENT-TOKEN-TYPE',
       flow: 'Request -> 402 requirements -> sign (no broadcast) -> retry with X-PAYMENT -> settle via relay -> inference',
     },
+    fees: {
+      providerShare: '92%',
+      marketplaceFee: '8%',
+      routedTo: "the model's legion treasury via legion-fees.route",
+      custody: 'non-custodial — provider is paid on-chain directly to its payout wallet; the gateway never holds funds',
+      toEarn: 'free — no listing fee, no bond required to register or earn',
+    },
     endpoints: {
       skill: 'GET /skill.md  (agent skill manifest — read this first)',
       models: 'GET /v1/models',

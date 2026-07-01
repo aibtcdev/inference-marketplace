@@ -104,6 +104,10 @@ You run an OpenAI-compatible endpoint (vLLM / HF Inference Endpoint / Ollama /
 SGLang / …). Register it; the marketplace verifies it is reachable **and**
 actually serving inference, then wraps it in x402 so clients pay **you** directly.
 
+**Fees — you keep 92%.** Registering and earning are free (no listing fee, no
+bond). Each paid request settles on-chain, non-custodial: **92% → your payout
+wallet**, **8% → the model's legion treasury**. The gateway never holds funds.
+
 ### Already public — one request
 \`\`\`
 curl -X POST ${origin}/v1/providers \\
