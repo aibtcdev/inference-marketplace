@@ -536,7 +536,16 @@ app.post('/v1/providers/:id/check', async (c) => {
 });
 
 // Remove a provider (operator/self-service).
+// Remove a provider from the directory (destructive: drops it everywhere and
+// deletes its stored key). Gated by ADMIN_TOKEN (X-Admin-Token header) — same
+// enforcement lever as /flag. Provider ids are public, so an ungated delete
+// would let anyone knock any provider (or the whole marketplace) offline.
+// Providers who just want to go offline stop their tunnel (health de-routes them);
+// removal from the directory is an operator action.
 app.delete('/v1/providers/:id', async (c) => {
+  const admin = c.env.ADMIN_TOKEN;
+  if (!admin) return c.json({ error: 'delete endpoint requires ADMIN_TOKEN to be configured' }, 503);
+  if (c.req.header('X-Admin-Token') !== admin) return c.json({ error: 'unauthorized' }, 401);
   const ok = await directory.removeProvider(c.env.PROVIDERS, c.req.param('id'));
   return c.json({ removed: ok }, ok ? 200 : 404);
 });

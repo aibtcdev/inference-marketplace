@@ -40,6 +40,9 @@ function modelsTable(providers: Provider[]): string {
 export function renderSkillMd(ctx: SkillContext): string {
   const { origin, network, providers, defaultPricePerMTok } = ctx;
   const example = DEFAULT_MODEL.id;
+  // Payout address prefix follows the network: ST/SN on testnet, SP/SM on mainnet.
+  const walletEx = network === 'mainnet' ? 'SP...' : 'ST...';
+  const walletPrefixes = network === 'mainnet' ? '`SP…` / `SM…`' : '`ST…` / `SN…`';
 
   return `# Inference Marketplace — Agent Skill
 
@@ -115,7 +118,7 @@ curl -X POST ${origin}/v1/providers \\
   -d '{
     "name": "My node",
     "endpoint": "https://my-host/v1",
-    "payoutAddress": "SP...",
+    "payoutAddress": "${walletEx}",
     "models": ["Qwen/Qwen2.5-7B-Instruct"],
     "apiKey": "optional-shared-key"
   }'
@@ -124,7 +127,7 @@ curl -X POST ${origin}/v1/providers \\
   and commercially licensed before listing (made-up or non-commercial ids are rejected).
 - \`apiKey\` (optional) is stored server-side and **never returned**; the gateway
   forwards it, so direct calls without it are rejected.
-- \`payoutAddress\` is a mainnet Stacks address (\`SP…\` / \`SM…\`).
+- \`payoutAddress\` is a ${network} Stacks address (${walletPrefixes}).
 - On success your node is listed and immediately callable.
 
 You can instead host a \`schema.json\` (matching \`GET ${origin}/v1/schema\`) at
@@ -133,7 +136,7 @@ You can instead host a \`schema.json\` (matching \`GET ${origin}/v1/schema\`) at
 ### Running locally — one command
 Secures your local model behind a shared key, opens a public tunnel, and registers it:
 \`\`\`
-curl -fsSL ${origin}/connect.sh | NAME="My node" WALLET=SP... MODELS=Qwen/Qwen2.5-7B-Instruct GATEWAY=${origin} bash
+curl -fsSL ${origin}/connect.sh | NAME="My node" WALLET=${walletEx} MODELS=Qwen/Qwen2.5-7B-Instruct GATEWAY=${origin} bash
 \`\`\`
 Keep it running to stay online. For a stable URL, use a named tunnel (\`TUNNEL=\` / \`HOST=\`).
 
