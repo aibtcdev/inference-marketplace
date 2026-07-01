@@ -57,13 +57,16 @@ export default function Home() {
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState<Provider | null>(null);
   const [network, setNetwork] = useState("testnet");
+  const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
+    setRefreshing(true);
     try {
       const r = await fetch(`${GATEWAY}/v1/providers`);
       const d = await r.json();
       setProviders(d.data || []);
     } catch { /* offline */ }
+    finally { setRefreshing(false); }
   }, []);
 
   // Network (testnet/mainnet) comes from the gateway so the badge can never
@@ -75,11 +78,10 @@ export default function Home() {
       .catch(() => { /* keep default */ });
   }, []);
 
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 20000);
-    return () => clearInterval(t);
-  }, [load]);
+  // Fetch once on page load so every visitor sees current status. No polling —
+  // status only changes on the gateway's 5-min health cron; use Refresh for a
+  // manual update.
+  useEffect(() => { load(); }, [load]);
 
   // keep the open detail panel fresh
   useEffect(() => {
@@ -148,7 +150,14 @@ export default function Home() {
       <main className="mx-auto max-w-6xl px-5 py-10">
         <div className="mb-4 flex items-baseline justify-between">
           <h2 className="text-lg font-medium">Providers</h2>
-          <span className="text-xs text-[#9aa3af]">auto-refreshes every 20s</span>
+          <button
+            onClick={() => load()}
+            disabled={refreshing}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#23262d] bg-[#101216] px-3 py-1.5 text-xs text-[#9aa3af] transition-colors hover:text-[#f2f4f7] disabled:opacity-60"
+          >
+            <span className={refreshing ? "inline-block h-3 w-3 animate-spin rounded-full border-2 border-[#f7931a] border-t-transparent" : ""}>{refreshing ? "" : "↻"}</span>
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
         </div>
 
         {providers.length === 0 ? (
