@@ -265,14 +265,27 @@ function ProviderDetail({ provider: p, onClose }: { provider: Provider; onClose:
   const mcp = `execute_x402_endpoint({\n  url: "${routeUrl}",\n  method: "POST",\n  data: {\n    model: "${modelId}",\n    messages: [{ role: "user", content: ${JSON.stringify(prompt)} }]\n  }\n})`;
   const curl = `curl -X POST ${routeUrl} \\\n  -H 'Content-Type: application/json' \\\n  -d '${JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }] })}'`;
 
+  // Fee split: of each paid call, 92% goes to the provider, 8% to the model's
+  // legion treasury. When we have a live quote we show the actual amounts.
+  const split = quote ? (() => {
+    const total = Number(quote.amount) || 0;
+    const provider = Math.round(total * 0.92);
+    return { provider: String(provider), treasury: String(total - provider) };
+  })() : null;
+
   return (
-    <div className="overlay-in fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/65 p-4 backdrop-blur-sm" onClick={onClose}>
-      <div className="modal-in my-6 w-full max-w-2xl rounded-2xl border border-[#23262d] bg-[#101216] p-6 shadow-2xl" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
-        <div className="flex items-start justify-between">
+    <div className="overlay-in fixed inset-0 z-50 bg-black/65 backdrop-blur-sm" onClick={onClose}>
+      <aside
+        className="drawer-in fixed inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-[#23262d] bg-[#0c0e12] shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog" aria-modal="true" aria-label={`${p.name} details`}
+      >
+        {/* sticky header stays put while the body scrolls */}
+        <header className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-[#23262d] bg-[#0c0e12]/95 px-6 py-4 backdrop-blur">
           <div className="flex items-center gap-3">
             <span className="grid h-10 w-10 place-items-center rounded-lg bg-[#f7931a]/12 text-base font-semibold text-[#f7931a]">{p.name.charAt(0).toUpperCase()}</span>
             <div>
-              <h2 className="wide text-lg">{p.name}</h2>
+              <h2 className="wide text-lg leading-tight">{p.name}</h2>
               <span className="flex items-center gap-1.5 text-xs">
                 <span className="h-2 w-2 rounded-full" style={{ background: st.c }} />
                 <span style={{ color: st.c }}>{st.label}</span>
@@ -282,75 +295,92 @@ function ProviderDetail({ provider: p, onClose }: { provider: Provider; onClose:
             </div>
           </div>
           <button onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-[#9aa3af] hover:bg-[#15181d] hover:text-[#f2f4f7]">✕</button>
-        </div>
+        </header>
 
-        {p.description && <p className="mt-3 text-sm text-[#cfd5dd]">{p.description}</p>}
+        <div className="flex-1 overflow-y-auto px-6 py-5">
+          {p.description && <p className="text-sm text-[#cfd5dd]">{p.description}</p>}
 
-        <div className="mt-4 grid gap-2 text-xs text-[#9aa3af]">
-          <div>endpoint <span className="mono break-all text-[#cfd5dd]">{p.endpoint}</span></div>
-          <div>pays to <span className="mono text-[#cfd5dd]">{p.payoutAddress}</span></div>
-        </div>
-
-        {quote && (
-          <div className="mt-3 rounded-lg border border-[#f7931a]/30 bg-[#f7931a]/[0.06] px-3 py-2.5 text-sm">
-            <span className="text-[#9aa3af]">pay-per-call </span>
-            <span className="text-[#f7931a]">≈ {formatPrice(quote.amount, quote.asset)}</span>
-            <span className="text-[#9aa3af]"> · settled to the provider via our x402 wrapper</span>
+          <div className="mt-4 grid gap-2 text-xs text-[#9aa3af]">
+            <div>endpoint <span className="mono break-all text-[#cfd5dd]">{p.endpoint}</span></div>
+            <div>pays to <span className="mono break-all text-[#cfd5dd]">{p.payoutAddress}</span></div>
           </div>
-        )}
 
-        {/* model capabilities */}
-        <h3 className="mt-6 mb-2 text-xs uppercase tracking-wider text-[#9aa3af]">Models</h3>
-        <div className="space-y-2">
-          {p.models.map((m) => (
-            <div key={m.id} className="rounded-lg border border-[#23262d] bg-[#15181d] p-3">
-              <div className="flex items-center justify-between">
-                <span className="mono text-sm text-[#f2f4f7]">{m.id}</span>
-                {m.contextLength && <span className="text-xs text-[#9aa3af]">{m.contextLength.toLocaleString()} ctx</span>}
+          {/* signature: the 92/8 fee split, shown as a bar clients can read at a glance */}
+          <div className="mt-5 rounded-xl border border-[#23262d] bg-[#101216] p-4">
+            <div className="flex items-baseline justify-between">
+              <h3 className="text-xs uppercase tracking-wider text-[#9aa3af]">Per paid call</h3>
+              <span className="wide text-base text-[#f7931a]">{quote ? `≈ ${formatPrice(quote.amount, quote.asset)}` : "price when reachable"}</span>
+            </div>
+            <div className="mt-3 flex h-2.5 gap-0.5 overflow-hidden rounded-full">
+              <div className="h-full rounded-l-full bg-[#f7931a]" style={{ width: "92%" }} />
+              <div className="h-full rounded-r-full bg-[#6b6152]" style={{ width: "8%" }} />
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+              <div>
+                <div className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#f7931a]" /><span className="text-[#f2f4f7]">92% · provider</span></div>
+                {split && <div className="mono mt-1 text-[#9aa3af]">{formatPrice(split.provider, quote!.asset)}</div>}
               </div>
-              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                {(m.capabilities ?? []).map((c) => (
-                  <span key={c} className="rounded-md border border-[#23262d] bg-[#0b0d10] px-2 py-0.5 text-xs text-[#7da2ff]">{c}</span>
-                ))}
-                {m.pricePerMTokenUsd != null && <span className="text-xs text-[#9aa3af]">${m.pricePerMTokenUsd}/Mtok</span>}
+              <div>
+                <div className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#6b6152]" /><span className="text-[#f2f4f7]">8% · legion treasury</span></div>
+                {split && <div className="mono mt-1 text-[#9aa3af]">{formatPrice(split.treasury, quote!.asset)}</div>}
               </div>
             </div>
-          ))}
-        </div>
-
-        {/* test console */}
-        <h3 className="mt-6 mb-2 text-xs uppercase tracking-wider text-[#9aa3af]">Test it · free preview (no payment)</h3>
-        <div className="rounded-lg border border-[#23262d] bg-[#0b0d10] p-3">
-          <textarea
-            value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={2}
-            className="w-full resize-none bg-transparent text-sm outline-none placeholder:text-[#5b626c]"
-            placeholder="Ask the model something…"
-          />
-          <div className="mt-2 flex items-center justify-between">
-            <span className="mono text-xs text-[#5b626c]">{modelId}</span>
-            <button onClick={run} disabled={running || p.status === "down"} className="rounded-lg bg-[#f7931a] px-4 py-1.5 text-sm font-medium text-[#1a1206] transition-opacity hover:opacity-90 disabled:opacity-50">
-              {running ? "Running…" : "Run"}
-            </button>
+            <p className="mt-3 text-[11px] leading-relaxed text-[#5b626c]">Settled on-chain and non-custodial — the provider is paid directly through our x402 wrapper.</p>
           </div>
-          {out && (
-            <div className="mt-3 rounded-md border border-[#23262d] bg-[#101216] p-3 text-sm">
-              {out.error ? <span className="text-[#ff4d4f]">{out.error}</span> : (
-                <>
-                  <div className="whitespace-pre-wrap text-[#e7eaee]">{out.content}</div>
-                  {out.latencyMs != null && <div className="mt-2 text-xs text-[#9aa3af]">{out.latencyMs}ms</div>}
-                </>
-              )}
-            </div>
-          )}
-        </div>
 
-        {/* how an agent calls it */}
-        <h3 className="mt-6 mb-2 text-xs uppercase tracking-wider text-[#9aa3af]">Use it · paid via x402</h3>
-        <div className="space-y-3">
-          <Snippet label="AIBTC MCP — pays the provider through our x402 wrapper" code={mcp} />
-          <Snippet label="curl (returns a 402 with the price until paid)" code={curl} />
+          {/* model capabilities */}
+          <h3 className="mt-6 mb-2 text-xs uppercase tracking-wider text-[#9aa3af]">Models</h3>
+          <div className="space-y-2">
+            {p.models.map((m) => (
+              <div key={m.id} className="rounded-lg border border-[#23262d] bg-[#15181d] p-3">
+                <div className="flex items-center justify-between">
+                  <span className="mono text-sm text-[#f2f4f7]">{m.id}</span>
+                  {m.contextLength && <span className="text-xs text-[#9aa3af]">{m.contextLength.toLocaleString()} ctx</span>}
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  {(m.capabilities ?? []).map((c) => (
+                    <span key={c} className="rounded-md border border-[#23262d] bg-[#0b0d10] px-2 py-0.5 text-xs text-[#7da2ff]">{c}</span>
+                  ))}
+                  {m.pricePerMTokenUsd != null && <span className="text-xs text-[#9aa3af]">${m.pricePerMTokenUsd}/Mtok</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* test console */}
+          <h3 className="mt-6 mb-2 text-xs uppercase tracking-wider text-[#9aa3af]">Test it · free preview (no payment)</h3>
+          <div className="rounded-lg border border-[#23262d] bg-[#0b0d10] p-3">
+            <textarea
+              value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={2}
+              className="w-full resize-none bg-transparent text-sm outline-none placeholder:text-[#5b626c]"
+              placeholder="Ask the model something…"
+            />
+            <div className="mt-2 flex items-center justify-between">
+              <span className="mono text-xs text-[#5b626c]">{modelId}</span>
+              <button onClick={run} disabled={running || p.status === "down"} className="rounded-lg bg-[#f7931a] px-4 py-1.5 text-sm font-medium text-[#1a1206] transition-opacity hover:opacity-90 disabled:opacity-50">
+                {running ? "Running…" : "Run"}
+              </button>
+            </div>
+            {out && (
+              <div className="mt-3 rounded-md border border-[#23262d] bg-[#101216] p-3 text-sm">
+                {out.error ? <span className="text-[#ff4d4f]">{out.error}</span> : (
+                  <>
+                    <div className="whitespace-pre-wrap text-[#e7eaee]">{out.content}</div>
+                    {out.latencyMs != null && <div className="mt-2 text-xs text-[#9aa3af]">{out.latencyMs}ms</div>}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* how an agent calls it */}
+          <h3 className="mt-6 mb-2 text-xs uppercase tracking-wider text-[#9aa3af]">Use it · paid via x402</h3>
+          <div className="space-y-3">
+            <Snippet label="AIBTC MCP — pays the provider through our x402 wrapper" code={mcp} />
+            <Snippet label="curl (returns a 402 with the price until paid)" code={curl} />
+          </div>
         </div>
-      </div>
+      </aside>
     </div>
   );
 }
@@ -462,12 +492,12 @@ function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDo
   const permaCmd = `cloudflared tunnel login\ncloudflared tunnel create ${tunnel}\ncloudflared tunnel route dns ${tunnel} ${host}\n\nTUNNEL=${tunnel} HOST=${host} \\\n  NAME=${JSON.stringify(name)} WALLET=${wallet} MODELS=${JSON.stringify(models)} PORT=${port} GATEWAY=${gw} \\\n  ./connect.sh`;
 
   return (
-    <div className="overlay-in fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm sm:p-6" onClick={onClose}>
-      <div className="modal-in flex max-h-[90vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-[#23262d] bg-[#101216] shadow-2xl" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+    <div className="overlay-in fixed inset-0 z-50 bg-black/65 backdrop-blur-sm" onClick={onClose}>
+      <div className="drawer-in fixed inset-y-0 right-0 flex w-full max-w-xl flex-col overflow-hidden border-l border-[#23262d] bg-[#0c0e12] shadow-2xl" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <div className="flex shrink-0 items-start justify-between border-b border-[#23262d] px-5 py-4 sm:px-6">
           <div>
             <h2 className="wide text-lg">List your model</h2>
-            <p className="mt-1 text-sm text-[#9aa3af]">Get paid in sBTC for serving inference. You keep <span className="text-[#35c759]">92%</span>.</p>
+            <p className="mt-1 text-sm text-[#9aa3af]">Get paid in sBTC for serving inference.</p>
           </div>
           <button onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-[#9aa3af] hover:bg-[#15181d] hover:text-[#f2f4f7]">✕</button>
         </div>
