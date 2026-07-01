@@ -530,7 +530,11 @@ app.post('/v1/providers/:id/check', async (c) => {
   const id = c.req.param('id');
   const provider = await directory.getProvider(c.env.PROVIDERS, id);
   if (!provider) return c.json({ error: 'Provider not found' }, 404);
-  const health = await checkEndpoint(provider.endpoint);
+  // Probe WITH the provider's key (like the cron) — a secured provider's proxy
+  // 401s a keyless probe, which would record a false "down" and overwrite the
+  // real status.
+  const key = provider.secured ? await directory.getProviderKey(c.env.PROVIDERS, id) : undefined;
+  const health = await checkEndpoint(provider.endpoint, key);
   const updated = await directory.setHealth(c.env.PROVIDERS, id, health);
   return c.json({ provider: updated });
 });
