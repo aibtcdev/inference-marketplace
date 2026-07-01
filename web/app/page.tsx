@@ -193,7 +193,7 @@ export default function Home() {
         <div className="mx-auto max-w-6xl px-5 py-6 text-xs text-[#9aa3af]">Non-custodial · clients pay providers directly via x402 · settled in sBTC on Stacks.</div>
       </footer>
 
-      {modal && <RegisterModal onClose={() => setModal(false)} onDone={load} />}
+      {modal && <RegisterModal onClose={() => setModal(false)} onDone={load} network={network} />}
       {detail && <ProviderDetail provider={detail} onClose={() => setDetail(null)} />}
     </div>
   );
@@ -358,7 +358,9 @@ function Snippet({ label, code }: { label: string; code: string }) {
   );
 }
 
-function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDone: () => void; network: string }) {
+  // Payout wallet prefix follows the network: ST/SN on testnet, SP/SM on mainnet.
+  const walletPh = network === "mainnet" ? "SP…" : "ST…";
   useEscape(onClose);
   const [tab, setTab] = useState<"local" | "public">("local");
   const [busy, setBusy] = useState(false);
@@ -480,7 +482,7 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
             <p className="mb-3 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 1.</span> Your node details (these fill the command below):</p>
             {[
               { k: "name" as const, label: "Display name", ph: "Alice's Qwen node" },
-              { k: "payoutAddress" as const, label: "Payout wallet", ph: "SP…" },
+              { k: "payoutAddress" as const, label: "Payout wallet", ph: walletPh },
             ].map((f) => (
               <label key={f.k} className="mb-3 block">
                 <span className="mb-1.5 block text-xs text-[#9aa3af]">{f.label}</span>
@@ -561,7 +563,7 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
                 </label>
                 <label className="mt-3 block">
                   <span className="mb-1.5 block text-xs text-[#9aa3af]">Payout wallet</span>
-                  <input value={pf.payoutAddress} onChange={(e) => setPf({ ...pf, payoutAddress: e.target.value })} placeholder="SP…" className={inputCls} />
+                  <input value={pf.payoutAddress} onChange={(e) => setPf({ ...pf, payoutAddress: e.target.value })} placeholder={walletPh} className={inputCls} />
                 </label>
                 <label className="mt-3 block">
                   <span className="mb-1.5 block text-xs text-[#9aa3af]">Supported model</span>
