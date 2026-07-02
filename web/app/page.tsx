@@ -419,7 +419,7 @@ function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDo
   // Payout wallet prefix follows the network: ST/SN on testnet, SP/SM on mainnet.
   const walletPh = network === "mainnet" ? "SP…" : "ST…";
   useEscape(onClose);
-  const [tab, setTab] = useState<"local" | "public">("local");
+  const [tab, setTab] = useState<"local" | "public">("public");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [watching, setWatching] = useState(false);
@@ -523,9 +523,9 @@ function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDo
         <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6">
           <div className="w-full">
         <div className="flex gap-1 rounded-lg border border-[#23262d] bg-[#0b0d10] p-1 text-sm">
-          {(["local", "public"] as const).map((t) => (
+          {(["public", "local"] as const).map((t) => (
             <button key={t} onClick={() => setTab(t)} className={`flex-1 rounded-md py-1.5 ${tab === t ? "bg-[#15181d] text-[#f2f4f7]" : "text-[#9aa3af]"}`}>
-              {t === "local" ? "Running locally" : "Already public"}
+              {t === "public" ? "Public endpoint" : "Running locally"}
             </button>
           ))}
         </div>
