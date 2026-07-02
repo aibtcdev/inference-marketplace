@@ -131,11 +131,10 @@ export default function Home() {
         <div aria-hidden className="pointer-events-none absolute -top-40 left-1/2 h-[420px] w-[820px] -translate-x-1/2" style={{ background: "radial-gradient(closest-side, rgba(247,147,26,0.16), transparent)" }} />
         <div className="relative mx-auto max-w-6xl px-5 py-12">
           <h1 className="wide max-w-3xl text-3xl leading-[1.08] tracking-tight md:text-5xl">
-            Inference, settled in <span className="text-[#f7931a]">Bitcoin</span>.
+            Get paid in <span className="text-[#f7931a]">Bitcoin</span> to run open models.
           </h1>
           <p className="mt-4 max-w-xl text-[15px] text-[#9aa3af]">
-            Open-model providers, verified live and paid per request in sBTC. Browse the network, inspect a model&apos;s
-            capabilities, and test it — or list your own endpoint.
+            One command turns your machine into a paid inference endpoint. You keep <span className="text-[#f2f4f7]">92%</span>, paid per request in sBTC — no account, no gatekeeping.
           </p>
           <div className="mt-7 flex flex-wrap gap-3">
             {[{ n: stats.total, l: "providers" }, { n: stats.live, l: "live now", accent: true }, { n: stats.models, l: "models" }].map((s) => (
