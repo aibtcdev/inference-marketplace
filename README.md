@@ -63,6 +63,7 @@ ollama serve & ollama pull qwen2.5:7b
 | POST | `/v1/chat/completions` | **dynamic** | OpenAI-compatible; price by model + tokens |
 | POST | `/v1/chat` | fixed | Simple `{prompt}` demo, default model |
 | POST | `/v1/providers` | free | Register an external provider (Phase 2) |
+| PATCH | `/v1/providers/{id}` | free | Self-service update (name/models/payout/endpoint/key); auth with the provider's shared key as `Authorization: Bearer` |
 | POST | `/v1/providers/{id}/flag` | free | **Operator only** (admin token): flag/unflag a provider |
 | POST | `/v1/feedback` | free | Submit reputation (Phase 3) |
 

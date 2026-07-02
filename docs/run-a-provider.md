@@ -72,9 +72,43 @@ system (systemd / launchd) so both come back automatically.
 ## C. Already on a public server
 
 If your model already has a public `https://…/v1` URL (your own auth or x402),
-just register it in the dashboard's **Already public** tab — paste the URL (and
+just register it in the dashboard's **Public endpoint** tab — paste the URL (and
 the API key if it's protected). We verify it's reachable + actually serving, then
-list it.
+list it. Or POST it directly:
+
+```bash
+curl -X POST https://<gateway>/v1/providers -H 'Content-Type: application/json' \
+  -d '{"name":"My node","endpoint":"https://my-host/v1","payoutAddress":"ST...","models":[{"id":"Qwen/Qwen2.5-7B-Instruct"}]}'
+```
+
+Add `"apiKey":"<token>"` if your endpoint is protected.
+
+---
+
+## Update your listing
+
+Change your name, models, payout wallet, or endpoint **in place** — no need to
+delete and re-add. Authorize with your **shared key** as a bearer token.
+
+`connect.sh` saves your id + key to `~/.inference-marketplace/<id>.env` (and
+prints them once), so you can source it:
+
+```bash
+source ~/.inference-marketplace/<id>.env
+curl -X PATCH "$GATEWAY/v1/providers/$PROVIDER_ID" \
+  -H "Authorization: Bearer $SHARED_KEY" -H 'Content-Type: application/json' \
+  -d '{"payoutAddress":"ST...","models":[{"id":"Qwen/Qwen2.5-7B-Instruct"}]}'
+```
+
+(If you registered a public endpoint, the shared key is the `apiKey` you supplied.)
+
+Only the fields you send change. Changing the endpoint or rotating the key
+re-verifies reachability before it takes effect, so a bad edit can't knock you
+offline.
+
+> The gateway stores the key **write-only** — it's never returned by any API.
+> The copy in `~/.inference-marketplace/<id>.env` is the only one you can read
+> back, so don't delete it. If it's lost, ask the operator to reset your key.
 
 ---
 
