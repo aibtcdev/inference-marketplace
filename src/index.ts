@@ -80,6 +80,18 @@ function markupFrom(env: Env): number | undefined {
   return Number.isFinite(m) && m > 0 ? m : undefined;
 }
 
+/** Constant-time string compare — no early exit, so a caller can't probe the
+ *  provider's shared key byte-by-byte via response timing. */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  let diff = ab.length ^ bb.length;
+  const n = Math.max(ab.length, bb.length);
+  for (let i = 0; i < n; i++) diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  return diff === 0;
+}
+
 /** Concatenated text of the chat messages, for upfront prompt-token sizing. */
 function promptTextOf(body: ChatCompletionBody): string {
   return (body.messages ?? [])
@@ -189,6 +201,7 @@ app.get('/', (c) => {
       chatCompletions: 'POST /v1/chat/completions  (OpenAI-compatible, dynamic price by model)',
       chat: 'POST /v1/chat  (simple prompt, cheap tier)',
       registerProvider: 'POST /v1/providers  (Phase 2)',
+      updateProvider: 'PATCH /v1/providers/{id}  (self-service; Authorization: Bearer <shared key>)',
       flagProvider: 'POST /v1/providers/{id}/flag  (operator only, admin token)',
       feedback: 'POST /v1/feedback  (Phase 3, reputation)',
     },
@@ -537,6 +550,88 @@ app.post('/v1/providers/:id/check', async (c) => {
   const health = await checkEndpoint(provider.endpoint, key);
   const updated = await directory.setHealth(c.env.PROVIDERS, id, health);
   return c.json({ provider: updated });
+});
+
+// Update a provider in place (self-service). Authorized by the provider's own
+// shared key — the secret only they and the gateway hold — so nobody else can
+// edit your listing or redirect your payout, even though provider ids are
+// public. Operators may override with ADMIN_TOKEN (same lever as delete/flag).
+// Editable: name, models, payoutAddress, description, api, endpoint, and the
+// shared key itself (rotation). Only fields present in the body change; unknown
+// fields (status/flagged/id/…) are ignored. Changing the endpoint or key
+// re-verifies reachability + function BEFORE the change is saved, so a bad edit
+// can never take a live provider offline.
+//
+//   curl -X PATCH $GATEWAY/v1/providers/$ID \
+//     -H "Authorization: Bearer $SHARED_KEY" -H 'Content-Type: application/json' \
+//     -d '{"models":[{"id":"Qwen/Qwen2.5-7B-Instruct"}]}'
+app.patch('/v1/providers/:id', async (c) => {
+  const id = c.req.param('id');
+  const provider = await directory.getProvider(c.env.PROVIDERS, id);
+  if (!provider) return c.json({ error: 'Provider not found' }, 404);
+
+  // --- Authenticate: prove ownership of the provider's shared key. -----------
+  const admin = c.env.ADMIN_TOKEN;
+  const isAdmin = Boolean(admin) && c.req.header('X-Admin-Token') === admin;
+  if (!isAdmin) {
+    if (!provider.secured) {
+      return c.json({ error: 'this provider has no shared key, so it cannot be self-updated; re-register it (connect.sh secures it) or ask the operator' }, 403);
+    }
+    const stored = await directory.getProviderKey(c.env.PROVIDERS, id);
+    const presented = (c.req.header('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
+    if (!stored || !presented || !timingSafeEqualStr(presented, stored)) {
+      return c.json({ error: 'unauthorized: send the provider shared key as `Authorization: Bearer <key>`' }, 401);
+    }
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  // Re-validate any model ids against Hugging Face (same gate as registration).
+  if (body.models !== undefined) {
+    const patchModels = Array.isArray(body.models) ? (body.models as Array<string | { id?: string }>) : [];
+    const modelIds = patchModels.map((m) => (typeof m === 'string' ? m : m?.id)).filter(Boolean) as string[];
+    if (modelIds.length === 0) return c.json({ error: 'at least one model id is required' }, 400);
+    const hfChecks = await Promise.all(modelIds.map((mid) => validateHfModel(mid)));
+    const badModel = hfChecks.find((r) => !r.valid);
+    if (badModel) return c.json({ error: badModel.error }, 400);
+  }
+
+  // prepareUpdate only reads known fields, so extra body keys can't be injected.
+  const patch = body as directory.ProviderUpdate;
+  patch.allowLocal = (c.env.NETWORK || 'testnet') !== 'mainnet'; // override any client value
+
+  let prepared;
+  try {
+    prepared = await directory.prepareUpdate(c.env.PROVIDERS, id, patch);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
+  if (!prepared) return c.json({ error: 'Provider not found' }, 404);
+
+  // Re-verify only when the endpoint or key changed (models/name/payout edits
+  // don't touch reachability). Nothing is persisted unless it passes.
+  let verification: Record<string, unknown> | undefined;
+  if (prepared.endpointChanged || prepared.keyChanged) {
+    const v = await verifyProvider(prepared.provider.endpoint, prepared.effectiveKey);
+    if (!v.ok) {
+      return c.json({ error: v.error, reachable: v.reachable, functional: v.functional }, 400);
+    }
+    prepared.provider.health = v.health;
+    prepared.provider.status = v.health.status;
+    verification = { reachable: true, functional: true, servedModel: v.servedModel, sample: v.sample };
+  }
+
+  const updated = await directory.commitUpdate(
+    c.env.PROVIDERS,
+    prepared.provider,
+    prepared.keyChanged ? prepared.effectiveKey : undefined,
+  );
+  return c.json({ provider: updated, ...(verification ? { verification } : {}) }, 200);
 });
 
 // Remove a provider (operator/self-service).
