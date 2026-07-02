@@ -2,32 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
-
-// Same-origin in production (the Worker serves both UI and API); override via
-// NEXT_PUBLIC_GATEWAY_URL for split local dev (next dev + wrangler dev).
-const GATEWAY = process.env.NEXT_PUBLIC_GATEWAY_URL ?? "";
-
-type Health = { status: string; latencyMs: number; x402: boolean; checkedAt: string; error?: string } | null;
-type ModelSpec = { id: string; name?: string; contextLength?: number; capabilities?: string[]; pricePerMTokenUsd?: number };
-type Provider = {
-  id: string;
-  name: string;
-  endpoint: string;
-  api: string;
-  payoutAddress: string;
-  models: ModelSpec[];
-  description?: string;
-  status: "live" | "degraded" | "down" | "pending";
-  health: Health;
-};
-
-const STATUS: Record<string, { c: string; label: string }> = {
-  live: { c: "#35c759", label: "live" },
-  degraded: { c: "#ffbf2e", label: "degraded" },
-  down: { c: "#ff4d4f", label: "down" },
-  pending: { c: "#6b7280", label: "checking" },
-};
-const trunc = (a: string) => (a && a.length > 16 ? `${a.slice(0, 9)}…${a.slice(-5)}` : a);
+import Link from "next/link";
+import { toast, Toaster } from "sonner";
+import { addressNetwork, connectWallet, disconnectWallet, signAuthHeaders, useWalletAddresses } from "./wallet";
+import { GATEWAY, STATUS, trunc } from "./shared";
+import type { Provider } from "./shared";
 
 // The models we run on-chain legions for. A provider picks one at registration so
 // it maps 1:1 to its legion (fees/treasury/gov). Keep in sync with the gateway's
@@ -58,6 +37,35 @@ export default function Home() {
   const [detail, setDetail] = useState<Provider | null>(null);
   const [network, setNetwork] = useState("testnet");
   const [refreshing, setRefreshing] = useState(false);
+  // Use the wallet's active address. If it's not on the gateway's network the
+  // user must switch their wallet's network (we don't silently derive one).
+  const addresses = useWalletAddresses();
+  const wallet = addresses[0] ?? null;
+  const walletNet = addressNetwork(wallet);
+  const netMismatch = !!wallet && !!walletNet && walletNet !== network;
+  const onConnect = useCallback(async () => {
+    try {
+      // Immediate, unmistakable feedback if they connected the wrong network.
+      const addr = (await connectWallet())[0] ?? null;
+      const net = addressNetwork(addr);
+      if (addr && net && net !== network) {
+        toast.error(`Your wallet is on ${net} — switch it to ${network} to register or manage endpoints.`);
+      } else if (addr) {
+        toast.success(`Connected ${addr.slice(0, 6)}…${addr.slice(-4)}`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("wallet connect failed:", e);
+      // Ignore the user simply closing the picker; surface everything else.
+      if (!/cancel|reject|closed|denied/i.test(msg)) {
+        toast.error(msg || "Couldn't open a wallet. Is a Stacks wallet (Leather/Xverse) installed?");
+      }
+    }
+  }, [network]);
+  const onDisconnect = useCallback(() => { disconnectWallet(); }, []);
+
+  // Register always opens the modal; the modal itself gates on wallet connection.
+  const openRegister = useCallback(() => setModal(true), []);
 
   const load = useCallback(async () => {
     setRefreshing(true);
@@ -98,6 +106,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen overflow-x-hidden">
+      <Toaster position="top-center" theme="dark" richColors />
       <header className="sticky top-0 z-20 border-b border-[#23262d] bg-[#08090a]/85 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-3 sm:px-5 sm:py-3.5">
           <div className="flex items-center gap-2 sm:gap-2.5">
@@ -119,13 +128,30 @@ export default function Home() {
                 </span>
               );
             })()}
-            <button onClick={() => setModal(true)} className="shrink-0 rounded-lg bg-[#f7931a] px-3 py-2 text-[13px] font-medium text-[#1a1206] transition-opacity hover:opacity-90 sm:px-4">
+            {wallet && (
+              <Link href="/dashboard" className="hidden shrink-0 rounded-lg border border-[#23262d] bg-[#101216] px-3 py-2 text-[12px] text-[#9aa3af] transition-colors hover:text-[#f2f4f7] sm:inline-block">
+                Dashboard
+              </Link>
+            )}
+            {wallet && (
+              <button onClick={onDisconnect} title={`Connected: ${wallet}\nTap to disconnect`} className="mono shrink-0 rounded-lg border border-[#23262d] bg-[#101216] px-3 py-2 text-[12px] text-[#9aa3af] transition-colors hover:text-[#f2f4f7]">
+                <span className="h-1.5 w-1.5 rounded-full bg-[#35c759] inline-block mr-1.5 align-middle" />
+                {trunc(wallet)}
+              </button>
+            )}
+            <button onClick={openRegister} className="shrink-0 rounded-lg bg-[#f7931a] px-3 py-2 text-[13px] font-medium text-[#1a1206] transition-opacity hover:opacity-90 sm:px-4">
               <span className="sm:hidden">Register</span>
               <span className="hidden sm:inline">Register endpoint</span>
             </button>
           </div>
         </div>
       </header>
+
+      {netMismatch && (
+        <div className="border-b border-[#ffbf2e]/30 bg-[#ffbf2e]/[0.08] px-5 py-2.5 text-center text-xs text-[#ffce6b]">
+          Your wallet is on <b>{walletNet}</b>, but this marketplace runs on <b>{network}</b>. Switch your wallet&apos;s network to {network} to register or manage endpoints.
+        </div>
+      )}
 
       <section className="relative overflow-hidden border-b border-[#23262d]">
         <div aria-hidden className="pointer-events-none absolute -top-40 left-1/2 h-[420px] w-[820px] -translate-x-1/2" style={{ background: "radial-gradient(closest-side, rgba(247,147,26,0.16), transparent)" }} />
@@ -148,6 +174,12 @@ export default function Home() {
       </section>
 
       <main className="mx-auto max-w-6xl px-5 py-10">
+        {wallet && (
+          <div className="mb-6 flex items-center justify-between rounded-xl border border-[#f7931a]/25 bg-[#f7931a]/[0.04] px-4 py-3">
+            <p className="text-sm text-[#cfd5dd]">Manage the endpoints paid to your wallet.</p>
+            <Link href="/dashboard" className="shrink-0 rounded-lg border border-[#f7931a]/40 bg-[#f7931a]/10 px-3 py-1.5 text-xs font-medium text-[#f7931a] hover:bg-[#f7931a]/15">Open dashboard →</Link>
+          </div>
+        )}
         <div className="mb-4 flex items-baseline justify-between">
           <h2 className="text-lg font-medium">Providers</h2>
           <button
@@ -163,7 +195,7 @@ export default function Home() {
         {providers.length === 0 ? (
           <div className="rounded-xl border border-dashed border-[#23262d] bg-[#101216] p-12 text-center">
             <p className="text-[#9aa3af]">No providers yet.</p>
-            <button onClick={() => setModal(true)} className="mt-2 text-sm font-medium text-[#f7931a] hover:opacity-90">Register the first endpoint →</button>
+            <button onClick={openRegister} className="mt-2 text-sm font-medium text-[#f7931a] hover:opacity-90">Register the first endpoint →</button>
           </div>
         ) : (
           <div className="space-y-3">
@@ -202,7 +234,7 @@ export default function Home() {
         <div className="mx-auto max-w-6xl px-5 py-6 text-xs text-[#9aa3af]">Non-custodial · clients pay providers directly via x402 · settled in sBTC on Stacks.</div>
       </footer>
 
-      {modal && <RegisterModal onClose={() => setModal(false)} onDone={load} network={network} />}
+      {modal && <RegisterModal onClose={() => setModal(false)} onDone={load} network={network} wallet={wallet} onConnect={onConnect} />}
       {detail && <ProviderDetail provider={detail} onClose={() => setDetail(null)} />}
     </div>
   );
@@ -414,21 +446,39 @@ function Snippet({ label, code }: { label: string; code: string }) {
   );
 }
 
-function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDone: () => void; network: string }) {
-  // Payout wallet prefix follows the network: ST/SN on testnet, SP/SM on mainnet.
-  const walletPh = network === "mainnet" ? "SP…" : "ST…";
+// Read-only payout = the connected wallet. Earnings settle here; not editable.
+function PayoutField({ payout }: { payout: string }) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-xs text-[#9aa3af]">Payout wallet (your connected wallet)</span>
+      <div className="mono flex items-center gap-2 break-all rounded-lg border border-[#23262d] bg-[#0b0d10] px-3 py-2.5 text-xs text-[#cfd5dd]">
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#35c759]" />
+        {payout || "—"}
+      </div>
+    </label>
+  );
+}
+
+function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClose: () => void; onDone: () => void; network: string; wallet: string | null; onConnect: () => void }) {
   useEscape(onClose);
+  // Payout is always the connected wallet.
+  const payout = (wallet ?? "").trim();
+  // Gate the form until a wallet on the right network is connected.
+  const walletNet = addressNetwork(wallet);
+  const needsConnect = !wallet;
+  const wrongNet = !!wallet && walletNet !== network;
+  const gated = needsConnect || wrongNet;
   const [tab, setTab] = useState<"local" | "public">("public");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [watching, setWatching] = useState(false);
 
-  const [lf, setLf] = useState({ name: "", payoutAddress: "", models: "", port: "11434", host: "" });
+  const [lf, setLf] = useState({ name: "", models: "", port: "11434", host: "" });
   const [src, setSrc] = useState("");
   const [pubKey, setPubKey] = useState("");
   // Inline fields for an already-public endpoint (skipped when a schema.json URL
   // is pasted — the manifest carries name/wallet/models itself).
-  const [pf, setPf] = useState({ name: "", payoutAddress: "", models: "" });
+  const [pf, setPf] = useState({ name: "", models: "" });
 
   // After the user runs the connect command on their machine, the script
   // registers itself — so we poll the directory and confirm the moment the
@@ -436,7 +486,7 @@ function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDo
   useEffect(() => {
     if (!watching) return;
     let alive = true;
-    const want = { name: lf.name.trim(), wallet: lf.payoutAddress.trim() };
+    const want = { name: lf.name.trim(), wallet: payout };
     const tick = async () => {
       try {
         const r = await fetch(`${GATEWAY}/v1/providers`);
@@ -456,16 +506,24 @@ function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDo
     };
     tick();
     return () => { alive = false; };
-  }, [watching, lf.name, lf.payoutAddress, onDone, onClose]);
+  }, [watching, lf.name, payout, onDone, onClose]);
 
   async function sendPublic(payload: Record<string, unknown>) {
     setBusy(true); setResult(null);
     try {
-      const r = await fetch(`${GATEWAY}/v1/providers`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      // Prove ownership: sign the register message with the payout wallet. The
+      // gateway only stores the endpoint if the signature recovers to payoutAddress.
+      // Scope must match the server's (the endpoint URL, or manifestUrl).
+      const scope = String(payload.endpoint || payload.manifestUrl || "");
+      const headers = await signAuthHeaders("register", scope);
+      const r = await fetch(`${GATEWAY}/v1/providers`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const j = await r.json();
       if (r.ok) { setResult({ ok: true, msg: "Verified ✓ reachable + serving inference." }); onDone(); setTimeout(onClose, 1400); }
       else setResult({ ok: false, msg: j.error || "Couldn't verify that endpoint." });
-    } catch { setResult({ ok: false, msg: "Gateway unreachable." }); }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setResult({ ok: false, msg: /cancel|reject|closed|denied/i.test(msg) ? "Signature cancelled — you must sign to prove you own the payout wallet." : "Gateway unreachable." });
+    }
     finally { setBusy(false); }
   }
 
@@ -473,21 +531,21 @@ function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDo
   // supplied inline. We send the inline fields verbatim — the gateway validates
   // the models against Hugging Face and verifies the endpoint before listing.
   const pubIsManifest = src.trim().endsWith(".json");
-  const pubReady = !!src.trim() && (pubIsManifest || !!(pf.name.trim() && pf.payoutAddress.trim() && pf.models.trim()));
+  const pubReady = !!payout && !!src.trim() && (pubIsManifest || !!(pf.name.trim() && pf.models.trim()));
 
   function submitPublic(e: FormEvent) {
     e.preventDefault();
     const url = src.trim();
     const apiKey = pubKey.trim() || undefined;
     if (pubIsManifest) {
-      sendPublic({ manifestUrl: url, ...(apiKey ? { apiKey } : {}) });
+      sendPublic({ manifestUrl: url, payoutAddress: payout, ...(apiKey ? { apiKey } : {}) });
       return;
     }
     const models = pf.models.split(",").map((m) => m.trim()).filter(Boolean);
     sendPublic({
       name: pf.name.trim(),
       endpoint: url,
-      payoutAddress: pf.payoutAddress.trim(),
+      payoutAddress: payout,
       models,
       ...(apiKey ? { apiKey } : {}),
     });
@@ -499,14 +557,13 @@ function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDo
   // a paste. Normalize the model list (trim each id, drop blanks) so stray spaces
   // can't sneak in. Commands stay hidden until name + wallet + model are filled.
   const name = lf.name.trim();
-  const wallet = lf.payoutAddress.trim();
   const port = lf.port.trim() || "11434";
   const models = lf.models.split(",").map((m) => m.trim()).filter(Boolean).join(",");
-  const ready = !!(name && wallet && models);
-  const cmd = `curl -fsSL ${gw}/connect.sh | NAME=${JSON.stringify(name)} WALLET=${wallet} MODELS=${JSON.stringify(models)} PORT=${port} GATEWAY=${gw} bash`;
+  const ready = !!(name && payout && models);
+  const cmd = `curl -fsSL ${gw}/connect.sh | NAME=${JSON.stringify(name)} WALLET=${payout} MODELS=${JSON.stringify(models)} PORT=${port} GATEWAY=${gw} bash`;
   const host = lf.host.trim() || "node.yourdomain.com";
   const tunnel = (lf.host.trim().split(".")[0] || "my-node").replace(/[^a-z0-9-]/gi, "-");
-  const permaCmd = `cloudflared tunnel login\ncloudflared tunnel create ${tunnel}\ncloudflared tunnel route dns ${tunnel} ${host}\n\nTUNNEL=${tunnel} HOST=${host} \\\n  NAME=${JSON.stringify(name)} WALLET=${wallet} MODELS=${JSON.stringify(models)} PORT=${port} GATEWAY=${gw} \\\n  ./connect.sh`;
+  const permaCmd = `cloudflared tunnel login\ncloudflared tunnel create ${tunnel}\ncloudflared tunnel route dns ${tunnel} ${host}\n\nTUNNEL=${tunnel} HOST=${host} \\\n  NAME=${JSON.stringify(name)} WALLET=${payout} MODELS=${JSON.stringify(models)} PORT=${port} GATEWAY=${gw} \\\n  ./connect.sh`;
 
   return (
     <div className="overlay-in fixed inset-0 z-50 bg-black/65 backdrop-blur-sm" onClick={onClose}>
@@ -519,8 +576,26 @@ function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDo
           <button onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-[#9aa3af] hover:bg-[#15181d] hover:text-[#f2f4f7]">✕</button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6">
-          <div className="w-full">
+        <div className="relative flex-1 overflow-y-auto px-5 py-5 sm:px-6">
+          {gated && (
+            <div className="absolute inset-0 z-10 grid place-items-center p-6">
+              <div className="max-w-xs rounded-xl border border-[#23262d] bg-[#0c0e12] p-5 text-center shadow-2xl">
+                {needsConnect ? (
+                  <>
+                    <p className="text-sm font-medium text-[#f2f4f7]">Connect your wallet to register</p>
+                    <p className="mt-1 text-xs text-[#9aa3af]">Your connected wallet becomes the payout address for this endpoint.</p>
+                    <button onClick={onConnect} className="mt-3 w-full rounded-lg bg-[#f7931a] py-2.5 text-sm font-medium text-[#1a1206] hover:opacity-90">Connect wallet</button>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm font-medium text-[#ffbf2e]">Wrong network</p>
+                    <p className="mt-1 text-xs text-[#9aa3af]">Your wallet is on {walletNet}. Switch it to {network} to register.</p>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+          <div className={`w-full ${gated ? "pointer-events-none select-none blur-[3px] opacity-40" : ""}`}>
         <div className="flex gap-1 rounded-lg border border-[#23262d] bg-[#0b0d10] p-1 text-sm">
           {(["public", "local"] as const).map((t) => (
             <button key={t} onClick={() => setTab(t)} className={`flex-1 rounded-md py-1.5 ${tab === t ? "bg-[#15181d] text-[#f2f4f7]" : "text-[#9aa3af]"}`}>
@@ -536,15 +611,11 @@ function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDo
         {tab === "local" ? (
           <div className="mt-4">
             <p className="mb-3 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 1.</span> Your node details (these fill the command below):</p>
-            {[
-              { k: "name" as const, label: "Display name", ph: "Alice's Qwen node" },
-              { k: "payoutAddress" as const, label: "Payout wallet", ph: walletPh },
-            ].map((f) => (
-              <label key={f.k} className="mb-3 block">
-                <span className="mb-1.5 block text-xs text-[#9aa3af]">{f.label}</span>
-                <input value={lf[f.k]} onChange={(e) => setLf({ ...lf, [f.k]: e.target.value })} placeholder={f.ph} className={inputCls} />
-              </label>
-            ))}
+            <label className="mb-3 block">
+              <span className="mb-1.5 block text-xs text-[#9aa3af]">Display name</span>
+              <input value={lf.name} onChange={(e) => setLf({ ...lf, name: e.target.value })} placeholder="Alice's Qwen node" className={inputCls} />
+            </label>
+            <PayoutField payout={payout} />
             <label className="mb-3 block">
               <span className="mb-1.5 block text-xs text-[#9aa3af]">Supported model</span>
               <select value={lf.models} onChange={(e) => setLf({ ...lf, models: e.target.value })} className={inputCls}>
@@ -589,14 +660,14 @@ function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDo
               ) : (
                 <button
                   onClick={() => { setResult(null); setWatching(true); }}
-                  disabled={!lf.name.trim() || !lf.payoutAddress.trim()}
+                  disabled={!lf.name.trim() || !payout}
                   className="w-full rounded-lg bg-[#f7931a] py-3 text-sm font-medium text-[#1a1206] transition-opacity hover:opacity-90 disabled:opacity-50"
                 >
                   I&apos;ve run it — watch for my node
                 </button>
               )}
-              {!lf.name.trim() || !lf.payoutAddress.trim() ? (
-                <p className="mt-1.5 text-[11px] text-[#5b626c]">Fill name + wallet above so we can match your node.</p>
+              {!lf.name.trim() ? (
+                <p className="mt-1.5 text-[11px] text-[#5b626c]">Fill in a display name above so we can match your node.</p>
               ) : null}
             </div>
           </div>
@@ -617,10 +688,7 @@ function RegisterModal({ onClose, onDone, network }: { onClose: () => void; onDo
                   <span className="mb-1.5 block text-xs text-[#9aa3af]">Display name</span>
                   <input value={pf.name} onChange={(e) => setPf({ ...pf, name: e.target.value })} placeholder="Alice's Qwen node" className={inputCls} />
                 </label>
-                <label className="mt-3 block">
-                  <span className="mb-1.5 block text-xs text-[#9aa3af]">Payout wallet</span>
-                  <input value={pf.payoutAddress} onChange={(e) => setPf({ ...pf, payoutAddress: e.target.value })} placeholder={walletPh} className={inputCls} />
-                </label>
+                <div className="mt-3"><PayoutField payout={payout} /></div>
                 <label className="mt-3 block">
                   <span className="mb-1.5 block text-xs text-[#9aa3af]">Supported model</span>
                   <select value={pf.models} onChange={(e) => setPf({ ...pf, models: e.target.value })} className={inputCls}>
