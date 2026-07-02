@@ -159,6 +159,116 @@ export async function getProviderKey(kv: KV, id: string): Promise<string | undef
   return (await kv.get(keyKey(id))) ?? undefined;
 }
 
+/** A partial edit to an existing provider. Only the present fields change. */
+export interface ProviderUpdate {
+  name?: string;
+  endpoint?: string;
+  payoutAddress?: string;
+  api?: string;
+  models?: Array<string | ModelSpec>;
+  description?: string;
+  /** Rotate the shared secret (stored server-side, never returned). */
+  apiKey?: string;
+  reputationAgentId?: number;
+  allowLocal?: boolean;
+}
+
+export interface PreparedUpdate {
+  /** The merged record, not yet persisted. */
+  provider: Provider;
+  /** Key to (re)verify the endpoint with — the new one if rotated, else current. */
+  effectiveKey?: string;
+  endpointChanged: boolean;
+  keyChanged: boolean;
+}
+
+/**
+ * Validate a partial update and produce the merged record WITHOUT persisting.
+ * Only fields present in `patch` change; everything else is preserved from the
+ * current record (so this can never be used to inject `flagged`, `status`, `id`,
+ * etc.). The caller re-verifies reachability when the endpoint or key changed,
+ * then calls `commitUpdate`. Throws on invalid input (same rules as
+ * registration). Returns undefined if the provider doesn't exist.
+ */
+export async function prepareUpdate(kv: KV, id: string, patch: ProviderUpdate): Promise<PreparedUpdate | undefined> {
+  const providers = await listProviders(kv);
+  const current = providers.find((p) => p.id === id);
+  if (!current) return undefined;
+
+  const next: Provider = { ...current, models: [...current.models] };
+
+  if (patch.name !== undefined) {
+    const name = patch.name.trim();
+    if (!name) throw new Error('name cannot be empty');
+    next.name = name;
+  }
+
+  let endpointChanged = false;
+  if (patch.endpoint !== undefined) {
+    const endpoint = patch.endpoint.trim().replace(/\/$/, '');
+    assertSafeEndpoint(endpoint, patch.allowLocal ?? false); // SSRF guard
+    if (endpoint !== current.endpoint) {
+      if (providers.some((p) => p.id !== id && p.endpoint === endpoint)) {
+        throw new Error('this endpoint is already registered');
+      }
+      next.endpoint = endpoint;
+      endpointChanged = true;
+    }
+  }
+
+  if (patch.payoutAddress !== undefined) {
+    const payoutAddress = patch.payoutAddress.trim();
+    if (!/^S[PMTN][0-9A-Z]+$/.test(payoutAddress)) throw new Error('payoutAddress must be a Stacks address (SP/SM mainnet, ST/SN testnet)');
+    next.payoutAddress = payoutAddress;
+  }
+
+  if (patch.api !== undefined) {
+    const api = patch.api.trim();
+    if (api) next.api = api;
+  }
+
+  if (patch.models !== undefined) {
+    const models = normalizeModels(patch.models);
+    if (!models.length) throw new Error('at least one model (with an id) is required');
+    next.models = models;
+  }
+
+  if (patch.description !== undefined) {
+    const d = patch.description.trim();
+    if (d) next.description = d;
+    else delete next.description;
+  }
+
+  if (patch.reputationAgentId !== undefined) {
+    next.reputation = patch.reputationAgentId
+      ? { ...(next.reputation ?? {}), agentId: patch.reputationAgentId }
+      : null;
+  }
+
+  // Key rotation. We never un-secure an endpoint via update (that would expose
+  // it), so an empty/absent apiKey leaves the current key in place.
+  let keyChanged = false;
+  let effectiveKey = await getProviderKey(kv, id);
+  if (typeof patch.apiKey === 'string' && patch.apiKey.length > 0) {
+    effectiveKey = patch.apiKey;
+    next.secured = true;
+    keyChanged = true;
+  }
+
+  return { provider: next, effectiveKey, endpointChanged, keyChanged };
+}
+
+/** Persist a prepared update (record + optional rotated shared key). */
+export async function commitUpdate(kv: KV, provider: Provider, newKey?: string): Promise<Provider> {
+  const providers = await listProviders(kv);
+  const i = providers.findIndex((p) => p.id === provider.id);
+  if (i === -1) throw new Error('provider not found');
+  providers[i] = provider;
+  await saveAll(kv, providers);
+  if (newKey) await kv.put(keyKey(provider.id), newKey);
+  return provider;
+}
+
 /** Update a provider's health snapshot + derived status. */
 export async function setHealth(kv: KV, id: string, health: HealthResult): Promise<Provider | undefined> {
   const providers = await listProviders(kv);

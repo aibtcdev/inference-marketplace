@@ -81,7 +81,16 @@ RESP="$(curl -s -X POST "${GATEWAY}/v1/providers" -H 'Content-Type: application/
   -d "{\"name\":\"${NAME}\",\"endpoint\":\"${URL}/v1\",\"payoutAddress\":\"${WALLET}\",\"apiKey\":\"${KEY}\",\"models\":[${MODELS_JSON}]}")"
 
 if printf '%s' "$RESP" | grep -q '"provider"'; then
+  PID="$(printf '%s' "$RESP" | grep -oE '"id":"[^"]+"' | head -1 | sed 's/"id":"//;s/"$//')"
   echo "✅ Live & secured — direct calls without the key get 401. Keep this open to stay online (Ctrl+C to stop)."
+  echo
+  echo "   Provider id:  ${PID}"
+  echo "   Shared key:   ${KEY}"
+  echo "   ↑ keep the key secret — it's how you (and only you) update this listing."
+  echo "   Update name/models/payout without deleting & re-adding:"
+  echo "     curl -X PATCH ${GATEWAY}/v1/providers/${PID} \\"
+  echo "       -H \"Authorization: Bearer ${KEY}\" -H 'Content-Type: application/json' \\"
+  echo "       -d '{\"payoutAddress\":\"${WALLET}\"}'"
   if [ "$STABLE" = 0 ]; then
     echo
     echo "⚠️  TEMPORARY quick tunnel (dev-grade): the URL changes on restart and caps at ~200"
