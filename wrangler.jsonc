@@ -31,9 +31,9 @@
   // PROVIDERS (KV) now holds only ephemeral data: wallet-auth replay nonces and
   // the legion stake cache. The provider directory lives in D1 (DB) below.
   "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
-  // Provider directory (D1). Create with: wrangler d1 create inference-db → paste
-  // the returned database_id below (the placeholder works for local dev only).
-  "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "local-inference-db" }],
+  // Provider directory (D1: inference-db, region APAC). Local `wrangler dev` uses a
+  // local SQLite keyed by the binding; --remote / deploy use this database_id.
+  "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "58bab586-33b9-4036-83e8-c22f76379e3e" }],
   // Continuous provider health monitoring.
   "triggers": { "crons": ["*/5 * * * *"] },
   "env": {
@@ -60,7 +60,7 @@
         "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
       },
       "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
-      "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "local-inference-db" }],
+      "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "58bab586-33b9-4036-83e8-c22f76379e3e" }],
       "triggers": { "crons": ["*/5 * * * *"] }
     },
     "production": {
@@ -83,7 +83,7 @@
         "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
       },
       "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
-      "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "local-inference-db" }],
+      "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "58bab586-33b9-4036-83e8-c22f76379e3e" }],
       "triggers": { "crons": ["*/5 * * * *"] }
     }
   }
