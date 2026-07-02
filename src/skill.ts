@@ -140,6 +140,18 @@ curl -fsSL ${origin}/connect.sh | NAME="My node" WALLET=${walletEx} MODELS=Qwen/
 \`\`\`
 Keep it running to stay online. For a stable URL, use a named tunnel (\`TUNNEL=\` / \`HOST=\`).
 
+### Update your listing (no delete/re-add)
+Change name, models, payout, or endpoint in place. Authorize with your shared
+key — \`connect.sh\` saves it to \`~/.inference-marketplace/{id}.env\` (or use the
+\`apiKey\` you registered with):
+\`\`\`
+source ~/.inference-marketplace/{id}.env
+curl -X PATCH ${origin}/v1/providers/\$PROVIDER_ID \\
+  -H "Authorization: Bearer \$SHARED_KEY" -H 'Content-Type: application/json' \\
+  -d '{"payoutAddress": "${walletEx}"}'
+\`\`\`
+Only the fields you send change; changing the endpoint or key re-verifies before it takes effect.
+
 ### Pricing
 Declare \`pricePerMTokenUsd\` per model (USD per 1M tokens) in your registration;
 the default is **$${defaultPricePerMTok}/Mtok**. The charged amount is converted to
@@ -173,6 +185,7 @@ How bad providers are handled, so you can trust the catalog:
 | POST | \`/v1/chat/completions\` | **paid** | OpenAI-compatible; price by model + tokens |
 | POST | \`/v1/route/{id}/chat/completions\` | **paid** | Call a specific provider; settles to them |
 | POST | \`/v1/providers\` | free | Register a provider (verified before listing) |
+| PATCH | \`/v1/providers/{id}\` | free | Self-service update (name/models/payout/endpoint/key); auth with the provider's shared key as \`Authorization: Bearer\` |
 | POST | \`/v1/providers/{id}/flag\` | free | **Operator only** (admin token): flag/unflag a provider (de-route) |
 `;
 }

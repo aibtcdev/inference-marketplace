@@ -18,6 +18,7 @@ import { legionForModel } from './model-legions';
 import { checkEndpoint, verifyProvider } from './health';
 import { REGISTRATION_SCHEMA } from './schema';
 import { validateHfModel } from './hf';
+import { recoverWalletAuth, toNetwork, AUTH_SKEW_SECONDS, type AuthAction } from './wallet-auth';
 import { quotePrice, realizedCostUsd, estimateTokens, usdToBaseUnits, getBtcUsd } from './pricing';
 import type { Quote } from './pricing';
 import { renderSkillMd } from './skill';
@@ -26,7 +27,9 @@ type Env = {
   RECIPIENT_ADDRESS: string;
   NETWORK: string;
   RELAY_URL: string;
-  /** KV namespace storing the external provider directory. */
+  /** D1 database holding the provider directory (providers + provider_keys). */
+  DB: D1Database;
+  /** KV namespace for ephemeral data: wallet-auth replay nonces + legion stake cache. */
   PROVIDERS: KVNamespace;
   /** Base URL of the OpenAI-compatible upstream (HF Inference Endpoint / vLLM). */
   UPSTREAM_BASE_URL: string;
@@ -80,16 +83,55 @@ function markupFrom(env: Env): number | undefined {
   return Number.isFinite(m) && m > 0 ? m : undefined;
 }
 
-/** Constant-time string compare — no early exit, so a caller can't probe the
- *  provider's shared key byte-by-byte via response timing. */
-function timingSafeEqualStr(a: string, b: string): boolean {
-  const enc = new TextEncoder();
-  const ab = enc.encode(a);
-  const bb = enc.encode(b);
-  let diff = ab.length ^ bb.length;
-  const n = Math.max(ab.length, bb.length);
-  for (let i = 0; i < n; i++) diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
-  return diff === 0;
+/** A fresh shared secret (48 hex chars), same shape connect.sh generates. */
+function genSharedKey(): string {
+  const b = new Uint8Array(24);
+  crypto.getRandomValues(b);
+  let s = '';
+  for (const x of b) s += x.toString(16).padStart(2, '0');
+  return s;
+}
+
+type WalletAuthOutcome = null | { ok: true } | { ok: false; status: 401 | 403; error: string };
+
+/**
+ * Authorize a request by the provider's payout-wallet signature. Returns `null`
+ * when no signature header is present (caller falls back to other auth);
+ * otherwise verifies the signature recovers to the provider's `payoutAddress`,
+ * is within the timestamp window, and hasn't been replayed.
+ * Headers: `X-Stacks-Signature` (RSV hex), `X-Stacks-Public-Key`, `X-Stacks-Timestamp`.
+ * `action` scopes the signature so, e.g., an `update` sig can't reveal a key.
+ */
+async function tryWalletAuth(
+  c: Context<{ Bindings: Env; Variables: Variables }>,
+  provider: directory.Provider,
+  action: AuthAction,
+): Promise<WalletAuthOutcome> {
+  const signature = c.req.header('X-Stacks-Signature');
+  if (!signature) return null;
+  const rec = recoverWalletAuth(
+    {
+      network: toNetwork(c.env.NETWORK),
+      action,
+      providerId: provider.id,
+      timestamp: Number(c.req.header('X-Stacks-Timestamp')),
+      signature,
+      publicKey: c.req.header('X-Stacks-Public-Key') || '',
+    },
+    Math.floor(Date.now() / 1000),
+  );
+  if (!rec.ok) return { ok: false, status: 401, error: rec.error };
+  if (rec.address !== provider.payoutAddress) {
+    return { ok: false, status: 403, error: "signature does not match this provider's payout wallet" };
+  }
+  // One-time nonce: reject replays within the window. Key on the canonical r||s
+  // (first 64 bytes), NOT the full signature — the recovery byte `v` is malleable
+  // (both v=0/v=1 verify), so keying on the whole string would let a flipped-v
+  // copy slip past. Verification enforces low-S, so r||s is canonical.
+  const nonceKey = `sigused:${signature.replace(/^0x/, '').slice(0, 128)}`;
+  if (await c.env.PROVIDERS.get(nonceKey)) return { ok: false, status: 401, error: 'signature already used (replay)' };
+  await c.env.PROVIDERS.put(nonceKey, '1', { expirationTtl: AUTH_SKEW_SECONDS * 2 });
+  return { ok: true };
 }
 
 /** Concatenated text of the chat messages, for upfront prompt-token sizing. */
@@ -112,7 +154,7 @@ async function routeToProvider(
   body: ChatCompletionBody,
   payment: X402Context | undefined,
 ): Promise<Response> {
-  const key = (await directory.getProviderKey(c.env.PROVIDERS, provider.id)) ?? '';
+  const key = (await directory.getProviderKey(c.env.DB, provider.id)) ?? '';
 
   // Map the requested model id to the provider's actual served model name.
   let upstreamModel = body.model;
@@ -141,8 +183,8 @@ const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 // CORS with x402 headers exposed
 app.use('*', cors({
   origin: '*',
-  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['payment-signature', 'X-PAYMENT-TOKEN-TYPE', 'Authorization', 'Content-Type'],
+  allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+  allowHeaders: ['payment-signature', 'X-PAYMENT-TOKEN-TYPE', 'Authorization', 'Content-Type', 'X-Stacks-Signature', 'X-Stacks-Public-Key', 'X-Stacks-Timestamp', 'X-Admin-Token'],
   exposeHeaders: ['payment-required', 'payment-response', 'X-PAYER-ADDRESS'],
 }));
 
@@ -222,7 +264,7 @@ app.get('/health', (c) => {
 // on in one step — pay-per-inference + provider onboarding — generated from the
 // live catalog so it never drifts.
 app.get('/skill.md', async (c) => {
-  const providers = await directory.listProviders(c.env.PROVIDERS);
+  const providers = await directory.listProviders(c.env.DB);
   const md = renderSkillMd({
     origin: new URL(c.req.url).origin,
     network: c.env.NETWORK || 'testnet',
@@ -273,7 +315,7 @@ app.get('/v1/models', async (c) => {
   // the explicit /v1/route/:id proxy; payment settles to the provider directly.
   // Exclude flagged + down providers, then rank by stake so higher-staked
   // providers list first (staking buys ranking; it is never required to earn).
-  const liveProviders = (await directory.listProviders(c.env.PROVIDERS)).filter((p) => p.status !== 'down' && !p.flagged);
+  const liveProviders = (await directory.listProviders(c.env.DB)).filter((p) => p.status !== 'down' && !p.flagged);
   const providers = await rankByStake(c.env, liveProviders);
   const btcUsd = await getBtcUsd();
   const community = [];
@@ -299,7 +341,7 @@ app.get('/v1/models', async (c) => {
 
 // Provider directory (supply side) — external providers registered via the UI.
 app.get('/v1/providers', async (c) => {
-  const data = await directory.listProviders(c.env.PROVIDERS);
+  const data = await directory.listProviders(c.env.DB);
   return c.json({ object: 'list', data });
 });
 
@@ -352,7 +394,7 @@ app.post('/v1/chat/completions',
     //    provider directly (non-custodial) at the provider's declared rate.
     //    Exclude flagged providers, then pick the highest-staked one for the model
     //    (staking buys ranking; it is never required to earn).
-    const providers = await directory.listProviders(c.env.PROVIDERS);
+    const providers = await directory.listProviders(c.env.DB);
     const candidates = providers.filter(
       (p) => p.status === 'live' && !p.flagged && p.models.some((m) => m.id === body.model),
     );
@@ -385,7 +427,7 @@ app.post('/v1/chat/completions',
 
     // Community provider -> forward to their endpoint (already paid to them).
     if (route?.kind === 'community') {
-      const provider = await directory.getProvider(c.env.PROVIDERS, route.providerId);
+      const provider = await directory.getProvider(c.env.DB, route.providerId);
       if (!provider || provider.status === 'down' || provider.flagged) {
         return c.json({ error: `No live provider for model ${body.model}` }, 503);
       }
@@ -486,6 +528,42 @@ app.post('/v1/providers', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
 
+  // --- Ownership: require a payout-wallet signature. No signature → don't store.
+  // The signer, recovered from the signature, MUST equal the payoutAddress being
+  // registered — that match proves the registrant owns the payout wallet (and, since
+  // the address is derived for THIS gateway's network, enforces the network too: a
+  // mainnet wallet recovers to a different address and is rejected). Scoped to the
+  // endpoint URL so a signature can't be replayed to register a different endpoint.
+  const claimedPayout = typeof body.payoutAddress === 'string' ? body.payoutAddress.trim() : '';
+  const signedEndpoint = typeof body.endpoint === 'string' ? body.endpoint
+    : typeof body.manifestUrl === 'string' ? body.manifestUrl : '';
+  if (!claimedPayout) return c.json({ error: 'payoutAddress is required' }, 400);
+  const regSig = c.req.header('X-Stacks-Signature');
+  if (!regSig) {
+    return c.json({ error: 'sign with your payout wallet (X-Stacks-Signature) to register — endpoints are only stored after ownership is proven' }, 401);
+  }
+  const regAuth = recoverWalletAuth(
+    {
+      network: toNetwork(c.env.NETWORK),
+      action: 'register',
+      providerId: signedEndpoint,
+      timestamp: Number(c.req.header('X-Stacks-Timestamp')),
+      signature: regSig,
+      publicKey: c.req.header('X-Stacks-Public-Key') || '',
+    },
+    Math.floor(Date.now() / 1000),
+  );
+  if (!regAuth.ok) return c.json({ error: regAuth.error }, 401);
+  if (regAuth.address !== claimedPayout) {
+    return c.json(
+      { error: `signature signed as ${regAuth.address}, which doesn't match payoutAddress ${claimedPayout} — switch your wallet to ${toNetwork(c.env.NETWORK)} and reconnect` },
+      403,
+    );
+  }
+  const regNonceKey = `sigused:${regSig.replace(/^0x/, '').slice(0, 128)}`;
+  if (await c.env.PROVIDERS.get(regNonceKey)) return c.json({ error: 'signature already used (replay)' }, 401);
+  await c.env.PROVIDERS.put(regNonceKey, '1', { expirationTtl: AUTH_SKEW_SECONDS * 2 });
+
   // Resolve the registration from a hosted schema.json when possible.
   let reg = body as unknown as directory.ProviderInput;
   const explicit = typeof body.manifestUrl === 'string' ? (body.manifestUrl as string) : null;
@@ -517,9 +595,11 @@ app.post('/v1/providers', async (c) => {
 
   // Validate + store (status pending). Allow http://localhost only off mainnet.
   reg.allowLocal = (c.env.NETWORK || 'testnet') !== 'mainnet';
+  reg.network = toNetwork(c.env.NETWORK); // payoutAddress must match this network
+  reg.payoutAddress = claimedPayout; // the signature-verified owner wins over any manifest value
   let provider;
   try {
-    provider = await directory.registerProvider(c.env.PROVIDERS, reg);
+    provider = await directory.registerProvider(c.env.DB, reg);
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
   }
@@ -528,10 +608,10 @@ app.post('/v1/providers', async (c) => {
   // key if the endpoint is secured). Roll back if not.
   const v = await verifyProvider(provider.endpoint, reg.apiKey);
   if (!v.ok) {
-    await directory.removeProvider(c.env.PROVIDERS, provider.id);
+    await directory.removeProvider(c.env.DB, provider.id);
     return c.json({ error: v.error, reachable: v.reachable, functional: v.functional }, 400);
   }
-  const updated = await directory.setHealth(c.env.PROVIDERS, provider.id, v.health);
+  const updated = await directory.setHealth(c.env.DB, provider.id, v.health);
   return c.json(
     { provider: updated ?? provider, verification: { reachable: true, functional: true, servedModel: v.servedModel, sample: v.sample } },
     201,
@@ -541,21 +621,26 @@ app.post('/v1/providers', async (c) => {
 // Re-run the health check for one provider on demand.
 app.post('/v1/providers/:id/check', async (c) => {
   const id = c.req.param('id');
-  const provider = await directory.getProvider(c.env.PROVIDERS, id);
+  const provider = await directory.getProvider(c.env.DB, id);
   if (!provider) return c.json({ error: 'Provider not found' }, 404);
   // Probe WITH the provider's key (like the cron) — a secured provider's proxy
   // 401s a keyless probe, which would record a false "down" and overwrite the
   // real status.
-  const key = provider.secured ? await directory.getProviderKey(c.env.PROVIDERS, id) : undefined;
+  const key = provider.secured ? await directory.getProviderKey(c.env.DB, id) : undefined;
   const health = await checkEndpoint(provider.endpoint, key);
-  const updated = await directory.setHealth(c.env.PROVIDERS, id, health);
+  const updated = await directory.setHealth(c.env.DB, id, health);
   return c.json({ provider: updated });
 });
 
-// Update a provider in place (self-service). Authorized by the provider's own
-// shared key — the secret only they and the gateway hold — so nobody else can
-// edit your listing or redirect your payout, even though provider ids are
-// public. Operators may override with ADMIN_TOKEN (same lever as delete/flag).
+// Update a provider in place (self-service). Three ways to authorize, in order:
+//   1. Payout-wallet signature — the provider signs a short message with the
+//      Stacks wallet that is their `payoutAddress`. Works for anyone (web/curl/
+//      MCP), including open endpoints with no shared key. Headers:
+//      X-Stacks-Signature, X-Stacks-Public-Key, X-Stacks-Timestamp. A timestamp
+//      + one-time nonce prevent replay.
+//   2. The provider's shared key (`Authorization: Bearer <key>`) — for script/
+//      curl users who registered with connect.sh.
+//   3. ADMIN_TOKEN (X-Admin-Token) — operator override.
 // Editable: name, models, payoutAddress, description, api, endpoint, and the
 // shared key itself (rotation). Only fields present in the body change; unknown
 // fields (status/flagged/id/…) are ignored. Changing the endpoint or key
@@ -567,26 +652,22 @@ app.post('/v1/providers/:id/check', async (c) => {
 //     -d '{"models":[{"id":"Qwen/Qwen2.5-7B-Instruct"}]}'
 app.patch('/v1/providers/:id', async (c) => {
   const id = c.req.param('id');
-  const provider = await directory.getProvider(c.env.PROVIDERS, id);
+  const provider = await directory.getProvider(c.env.DB, id);
   if (!provider) return c.json({ error: 'Provider not found' }, 404);
 
-  // --- Authenticate: prove ownership of the provider's shared key. -----------
-  const admin = c.env.ADMIN_TOKEN;
-  const isAdmin = Boolean(admin) && c.req.header('X-Admin-Token') === admin;
-  if (!isAdmin) {
-    if (!provider.secured) {
-      return c.json({ error: 'this provider has no shared key, so it cannot be self-updated; re-register it (connect.sh secures it) or ask the operator' }, 403);
-    }
-    const stored = await directory.getProviderKey(c.env.PROVIDERS, id);
-    const presented = (c.req.header('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
-    if (!stored || !presented || !timingSafeEqualStr(presented, stored)) {
-      return c.json({ error: 'unauthorized: send the provider shared key as `Authorization: Bearer <key>`' }, 401);
-    }
-  }
+  const rawBody = await c.req.text();
+
+  // --- Authenticate: payout-wallet signature only. Ownership is proven by a
+  // signature that recovers to the provider's payoutAddress — the same single
+  // proof used at registration. (The shared key is the gateway's upstream routing
+  // credential, not an ownership token, so it is NOT accepted here.) ------------
+  const wallet = await tryWalletAuth(c, provider, 'update');
+  if (!wallet) return c.json({ error: 'sign with your payout wallet (X-Stacks-Signature) to edit this endpoint' }, 401);
+  if (!wallet.ok) return c.json({ error: wallet.error }, wallet.status);
 
   let body: Record<string, unknown>;
   try {
-    body = await c.req.json();
+    body = rawBody ? JSON.parse(rawBody) : {};
   } catch {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
@@ -604,10 +685,11 @@ app.patch('/v1/providers/:id', async (c) => {
   // prepareUpdate only reads known fields, so extra body keys can't be injected.
   const patch = body as directory.ProviderUpdate;
   patch.allowLocal = (c.env.NETWORK || 'testnet') !== 'mainnet'; // override any client value
+  patch.network = toNetwork(c.env.NETWORK);
 
   let prepared;
   try {
-    prepared = await directory.prepareUpdate(c.env.PROVIDERS, id, patch);
+    prepared = await directory.prepareUpdate(c.env.DB, id, patch);
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
   }
@@ -627,11 +709,50 @@ app.patch('/v1/providers/:id', async (c) => {
   }
 
   const updated = await directory.commitUpdate(
-    c.env.PROVIDERS,
+    c.env.DB,
     prepared.provider,
     prepared.keyChanged ? prepared.effectiveKey : undefined,
   );
   return c.json({ provider: updated, ...(verification ? { verification } : {}) }, 200);
+});
+
+// Reveal (or rotate) a provider's shared key. Wallet-signature gated — only the
+// payout-wallet owner can read it back — so this is how a provider recovers a key
+// they never saw or lost (the gateway otherwise stores it write-only). Body:
+//   {}                → reveal the current key
+//   { "rotate": true } → generate a new key, store it, and return it
+// Operators may override with ADMIN_TOKEN.
+app.post('/v1/providers/:id/key', async (c) => {
+  const id = c.req.param('id');
+  const provider = await directory.getProvider(c.env.DB, id);
+  if (!provider) return c.json({ error: 'Provider not found' }, 404);
+
+  const rawBody = await c.req.text();
+  const admin = c.env.ADMIN_TOKEN;
+  const isAdmin = Boolean(admin) && c.req.header('X-Admin-Token') === admin;
+  if (!isAdmin) {
+    const wallet = await tryWalletAuth(c, provider, 'reveal-key');
+    if (!wallet) return c.json({ error: 'sign with your payout wallet (X-Stacks-Signature) to reveal your key' }, 401);
+    if (!wallet.ok) return c.json({ error: wallet.error }, wallet.status);
+  }
+
+  let rotate = false;
+  try {
+    rotate = rawBody ? Boolean((JSON.parse(rawBody) as { rotate?: unknown }).rotate) : false;
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  if (rotate) {
+    const key = genSharedKey();
+    await directory.setProviderKey(c.env.DB, id, key);
+    return c.json({ key, secured: true, rotated: true });
+  }
+  const key = await directory.getProviderKey(c.env.DB, id);
+  if (!key) {
+    return c.json({ secured: false, key: null, message: 'this provider has no shared key (open endpoint); send {"rotate":true} to set one' });
+  }
+  return c.json({ key, secured: true, rotated: false });
 });
 
 // Remove a provider (operator/self-service).
@@ -645,7 +766,7 @@ app.delete('/v1/providers/:id', async (c) => {
   const admin = c.env.ADMIN_TOKEN;
   if (!admin) return c.json({ error: 'delete endpoint requires ADMIN_TOKEN to be configured' }, 503);
   if (c.req.header('X-Admin-Token') !== admin) return c.json({ error: 'unauthorized' }, 401);
-  const ok = await directory.removeProvider(c.env.PROVIDERS, c.req.param('id'));
+  const ok = await directory.removeProvider(c.env.DB, c.req.param('id'));
   return c.json({ removed: ok }, ok ? 200 : 404);
 });
 
@@ -665,7 +786,7 @@ app.post('/v1/providers/:id/flag', async (c) => {
   }
   const body = await c.req.json<{ flagged?: boolean; reason?: string }>().catch(() => ({} as { flagged?: boolean; reason?: string }));
   const flagged = body.flagged !== false; // default true
-  const updated = await directory.setFlag(c.env.PROVIDERS, c.req.param('id'), flagged, body.reason);
+  const updated = await directory.setFlag(c.env.DB, c.req.param('id'), flagged, body.reason);
   if (!updated) return c.json({ error: 'Provider not found' }, 404);
   return c.json({ provider: updated, flagged });
 });
@@ -675,14 +796,14 @@ app.post('/v1/providers/:id/flag', async (c) => {
 // try it from the UI (server-side call avoids browser CORS). Auto-discovers the
 // provider's served model name. If the provider is x402-gated it returns 402.
 app.post('/v1/providers/:id/test', async (c) => {
-  const provider = await directory.getProvider(c.env.PROVIDERS, c.req.param('id'));
+  const provider = await directory.getProvider(c.env.DB, c.req.param('id'));
   if (!provider) return c.json({ error: 'Provider not found' }, 404);
 
   let body: { prompt?: string; model?: string; max_tokens?: number } = {};
   try { body = await c.req.json(); } catch { /* defaults */ }
   const prompt = body.prompt?.trim() || 'In one sentence, what is Bitcoin?';
 
-  const key = (await directory.getProviderKey(c.env.PROVIDERS, provider.id)) ?? '';
+  const key = (await directory.getProviderKey(c.env.DB, provider.id)) ?? '';
   const auth: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {};
 
   // Discover the served model name (e.g. "qwen2.5:7b") from the provider's /models.
@@ -725,7 +846,7 @@ app.post('/v1/providers/:id/test', async (c) => {
 // a bare provider gets monetized without running x402 themselves.
 app.post('/v1/route/:id/chat/completions',
   x402DynamicMiddleware(async (c, tokenType: TokenType) => {
-    const provider = await directory.getProvider(c.env.PROVIDERS, c.req.param('id') ?? '');
+    const provider = await directory.getProvider(c.env.DB, c.req.param('id') ?? '');
     if (!provider) return c.json({ error: 'Provider not found' }, 404);
     if (provider.status === 'down') return c.json({ error: 'Provider is currently down' }, 503);
 
@@ -750,7 +871,7 @@ app.post('/v1/route/:id/chat/completions',
     };
   }),
   async (c) => {
-    const provider = await directory.getProvider(c.env.PROVIDERS, c.req.param('id'));
+    const provider = await directory.getProvider(c.env.DB, c.req.param('id'));
     if (!provider) return c.json({ error: 'Provider not found' }, 404);
     const body = await c.req.json<ChatCompletionBody>();
     return routeToProvider(c, provider, body, c.get('x402'));
@@ -771,12 +892,12 @@ app.post('/v1/feedback', async (c) => {
 // schedule (see wrangler.jsonc triggers), updating live/degraded/down status.
 async function scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
   ctx.waitUntil((async () => {
-    const providers = await directory.listProviders(env.PROVIDERS);
+    const providers = await directory.listProviders(env.DB);
     await Promise.all(
       providers.map(async (p) => {
-        const key = p.secured ? await directory.getProviderKey(env.PROVIDERS, p.id) : undefined;
+        const key = p.secured ? await directory.getProviderKey(env.DB, p.id) : undefined;
         const health = await checkEndpoint(p.endpoint, key);
-        await directory.setHealth(env.PROVIDERS, p.id, health);
+        await directory.setHealth(env.DB, p.id, health);
       }),
     );
   })());

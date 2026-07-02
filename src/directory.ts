@@ -6,15 +6,15 @@
  * Non-custodial: payment flows client → provider directly (x402, payTo = the
  * provider's `payoutAddress`); we are the directory + trust layer.
  *
- * Storage: Cloudflare KV. Providers live as a single JSON array under the
- * `providers` key (fine for the expected scale; swap to per-key + index later).
+ * Storage: Cloudflare D1 (SQLite). One row per provider in `providers`, with the
+ * shared secret kept in a separate `provider_keys` table (never returned to
+ * clients). Row-per-provider avoids the read-modify-write contention of a single
+ * JSON blob: concurrent edits to different providers don't collide.
  */
 
 import type { HealthResult } from './health';
 import type { ModelSpec } from './schema';
 import { normalizeModels } from './schema';
-
-const KEY = 'providers';
 
 export interface Provider {
   id: string;
@@ -56,6 +56,8 @@ export interface ProviderInput {
   apiKey?: string;
   /** Dev/testnet only: permit http://localhost endpoints. */
   allowLocal?: boolean;
+  /** Gateway network; when set, payoutAddress must match its prefix. */
+  network?: 'mainnet' | 'testnet';
   reputationAgentId?: number;
 }
 
@@ -91,31 +93,94 @@ export function assertSafeEndpoint(endpoint: string, allowLocal: boolean): void 
   }
 }
 
-/** KV key holding a provider's shared secret (kept out of the provider record). */
-const keyKey = (id: string) => `key:${id}`;
+/** Reject a payout address whose network doesn't match the gateway's. Both are
+ *  valid Stacks addresses, but wallet-signature auth derives the signer address
+ *  for the GATEWAY's network — so a mismatched payout could never be matched,
+ *  silently locking the owner out. mainnet → SP/SM, testnet → ST/SN. */
+export function assertPayoutForNetwork(address: string, network?: 'mainnet' | 'testnet'): void {
+  if (!network) return;
+  const ok = network === 'mainnet'
+    ? address.startsWith('SP') || address.startsWith('SM')
+    : address.startsWith('ST') || address.startsWith('SN');
+  if (!ok) throw new Error(`payoutAddress must be a ${network} Stacks address (${network === 'mainnet' ? 'SP/SM' : 'ST/SN'})`);
+}
 
-type KV = KVNamespace;
+type DB = D1Database;
 
 function slugId(name: string): string {
   const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 24) || 'provider';
   return `${base}-${crypto.randomUUID().slice(0, 6)}`;
 }
 
-export async function listProviders(kv: KV): Promise<Provider[]> {
-  const raw = await kv.get(KEY);
-  return raw ? (JSON.parse(raw) as Provider[]) : [];
+/** A providers-table row as stored in D1 (snake_case, JSON columns as text). */
+interface ProviderRow {
+  id: string;
+  name: string;
+  endpoint: string;
+  api: string;
+  payout_address: string;
+  description: string | null;
+  secured: number;
+  status: string;
+  flagged: number;
+  flag_reason: string | null;
+  health: string | null;
+  models: string;
+  reputation: string | null;
+  registered_at: string;
 }
 
-async function saveAll(kv: KV, providers: Provider[]): Promise<void> {
-  await kv.put(KEY, JSON.stringify(providers));
+function rowToProvider(r: ProviderRow): Provider {
+  return {
+    id: r.id,
+    name: r.name,
+    endpoint: r.endpoint,
+    api: r.api,
+    payoutAddress: r.payout_address,
+    models: JSON.parse(r.models) as ModelSpec[],
+    ...(r.description ? { description: r.description } : {}),
+    secured: !!r.secured,
+    health: r.health ? (JSON.parse(r.health) as HealthResult) : null,
+    status: r.status as Provider['status'],
+    ...(r.flagged ? { flagged: true } : {}),
+    ...(r.flag_reason ? { flagReason: r.flag_reason } : {}),
+    reputation: r.reputation ? (JSON.parse(r.reputation) as Provider['reputation']) : null,
+    registeredAt: r.registered_at,
+  };
 }
 
-export async function getProvider(kv: KV, id: string): Promise<Provider | undefined> {
-  return (await listProviders(kv)).find((p) => p.id === id);
+export async function listProviders(db: DB): Promise<Provider[]> {
+  const { results } = await db.prepare('SELECT * FROM providers ORDER BY registered_at').all<ProviderRow>();
+  return (results ?? []).map(rowToProvider);
+}
+
+export async function getProvider(db: DB, id: string): Promise<Provider | undefined> {
+  const row = await db.prepare('SELECT * FROM providers WHERE id = ?').bind(id).first<ProviderRow>();
+  return row ? rowToProvider(row) : undefined;
+}
+
+/** Insert a provider row (+ its key). Shared by register and commitUpdate. */
+async function writeProvider(db: DB, p: Provider): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO providers (id, name, endpoint, api, payout_address, description, secured, status, flagged, flag_reason, health, models, reputation, registered_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name=excluded.name, endpoint=excluded.endpoint, api=excluded.api, payout_address=excluded.payout_address,
+         description=excluded.description, secured=excluded.secured, status=excluded.status, flagged=excluded.flagged,
+         flag_reason=excluded.flag_reason, health=excluded.health, models=excluded.models, reputation=excluded.reputation`,
+    )
+    .bind(
+      p.id, p.name, p.endpoint, p.api, p.payoutAddress, p.description ?? null,
+      p.secured ? 1 : 0, p.status, p.flagged ? 1 : 0, p.flagReason ?? null,
+      p.health ? JSON.stringify(p.health) : null, JSON.stringify(p.models),
+      p.reputation ? JSON.stringify(p.reputation) : null, p.registeredAt,
+    )
+    .run();
 }
 
 /** Validate + persist a new provider (status `pending` until first health check). */
-export async function registerProvider(kv: KV, input: ProviderInput): Promise<Provider> {
+export async function registerProvider(db: DB, input: ProviderInput): Promise<Provider> {
   const name = (input.name || '').trim();
   const endpoint = (input.endpoint || '').trim().replace(/\/$/, '');
   const payoutAddress = (input.payoutAddress || '').trim();
@@ -128,10 +193,11 @@ export async function registerProvider(kv: KV, input: ProviderInput): Promise<Pr
   // testnet ST/SN). Not a security check — the bond gate requires this to be a
   // real bonded principal and settlement verifies the actual on-chain txid.
   if (!/^S[PMTN][0-9A-Z]+$/.test(payoutAddress)) throw new Error('payoutAddress must be a Stacks address (SP/SM mainnet, ST/SN testnet)');
+  assertPayoutForNetwork(payoutAddress, input.network);
   if (!models.length) throw new Error('at least one model (with an id) is required');
 
-  const providers = await listProviders(kv);
-  if (providers.some((p) => p.endpoint === endpoint)) throw new Error('this endpoint is already registered');
+  const dupe = await db.prepare('SELECT id FROM providers WHERE endpoint = ?').bind(endpoint).first();
+  if (dupe) throw new Error('this endpoint is already registered');
 
   const provider: Provider = {
     id: slugId(name),
@@ -148,15 +214,26 @@ export async function registerProvider(kv: KV, input: ProviderInput): Promise<Pr
     registeredAt: new Date().toISOString(),
   };
 
-  providers.push(provider);
-  await saveAll(kv, providers);
-  if (input.apiKey) await kv.put(keyKey(provider.id), input.apiKey);
+  await writeProvider(db, provider);
+  if (input.apiKey) {
+    await db.prepare('INSERT OR REPLACE INTO provider_keys (id, shared_key) VALUES (?, ?)').bind(provider.id, input.apiKey).run();
+  }
   return provider;
 }
 
 /** The shared secret for a provider (server-side only). */
-export async function getProviderKey(kv: KV, id: string): Promise<string | undefined> {
-  return (await kv.get(keyKey(id))) ?? undefined;
+export async function getProviderKey(db: DB, id: string): Promise<string | undefined> {
+  const row = await db.prepare('SELECT shared_key FROM provider_keys WHERE id = ?').bind(id).first<{ shared_key: string }>();
+  return row?.shared_key ?? undefined;
+}
+
+/** Set (or rotate) a provider's shared secret and mark it secured. */
+export async function setProviderKey(db: DB, id: string, key: string): Promise<Provider | undefined> {
+  const provider = await getProvider(db, id);
+  if (!provider) return undefined;
+  await db.prepare('INSERT OR REPLACE INTO provider_keys (id, shared_key) VALUES (?, ?)').bind(id, key).run();
+  await db.prepare('UPDATE providers SET secured = 1 WHERE id = ?').bind(id).run();
+  return { ...provider, secured: true };
 }
 
 /** A partial edit to an existing provider. Only the present fields change. */
@@ -171,6 +248,8 @@ export interface ProviderUpdate {
   apiKey?: string;
   reputationAgentId?: number;
   allowLocal?: boolean;
+  /** Gateway network; when set, a changed payoutAddress must match its prefix. */
+  network?: 'mainnet' | 'testnet';
 }
 
 export interface PreparedUpdate {
@@ -190,9 +269,8 @@ export interface PreparedUpdate {
  * then calls `commitUpdate`. Throws on invalid input (same rules as
  * registration). Returns undefined if the provider doesn't exist.
  */
-export async function prepareUpdate(kv: KV, id: string, patch: ProviderUpdate): Promise<PreparedUpdate | undefined> {
-  const providers = await listProviders(kv);
-  const current = providers.find((p) => p.id === id);
+export async function prepareUpdate(db: DB, id: string, patch: ProviderUpdate): Promise<PreparedUpdate | undefined> {
+  const current = await getProvider(db, id);
   if (!current) return undefined;
 
   const next: Provider = { ...current, models: [...current.models] };
@@ -208,9 +286,8 @@ export async function prepareUpdate(kv: KV, id: string, patch: ProviderUpdate): 
     const endpoint = patch.endpoint.trim().replace(/\/$/, '');
     assertSafeEndpoint(endpoint, patch.allowLocal ?? false); // SSRF guard
     if (endpoint !== current.endpoint) {
-      if (providers.some((p) => p.id !== id && p.endpoint === endpoint)) {
-        throw new Error('this endpoint is already registered');
-      }
+      const dupe = await db.prepare('SELECT id FROM providers WHERE endpoint = ? AND id != ?').bind(endpoint, id).first();
+      if (dupe) throw new Error('this endpoint is already registered');
       next.endpoint = endpoint;
       endpointChanged = true;
     }
@@ -219,6 +296,7 @@ export async function prepareUpdate(kv: KV, id: string, patch: ProviderUpdate): 
   if (patch.payoutAddress !== undefined) {
     const payoutAddress = patch.payoutAddress.trim();
     if (!/^S[PMTN][0-9A-Z]+$/.test(payoutAddress)) throw new Error('payoutAddress must be a Stacks address (SP/SM mainnet, ST/SN testnet)');
+    assertPayoutForNetwork(payoutAddress, patch.network);
     next.payoutAddress = payoutAddress;
   }
 
@@ -248,7 +326,7 @@ export async function prepareUpdate(kv: KV, id: string, patch: ProviderUpdate): 
   // Key rotation. We never un-secure an endpoint via update (that would expose
   // it), so an empty/absent apiKey leaves the current key in place.
   let keyChanged = false;
-  let effectiveKey = await getProviderKey(kv, id);
+  let effectiveKey = await getProviderKey(db, id);
   if (typeof patch.apiKey === 'string' && patch.apiKey.length > 0) {
     effectiveKey = patch.apiKey;
     next.secured = true;
@@ -259,50 +337,38 @@ export async function prepareUpdate(kv: KV, id: string, patch: ProviderUpdate): 
 }
 
 /** Persist a prepared update (record + optional rotated shared key). */
-export async function commitUpdate(kv: KV, provider: Provider, newKey?: string): Promise<Provider> {
-  const providers = await listProviders(kv);
-  const i = providers.findIndex((p) => p.id === provider.id);
-  if (i === -1) throw new Error('provider not found');
-  providers[i] = provider;
-  await saveAll(kv, providers);
-  if (newKey) await kv.put(keyKey(provider.id), newKey);
+export async function commitUpdate(db: DB, provider: Provider, newKey?: string): Promise<Provider> {
+  const exists = await db.prepare('SELECT id FROM providers WHERE id = ?').bind(provider.id).first();
+  if (!exists) throw new Error('provider not found');
+  await writeProvider(db, provider);
+  if (newKey) await db.prepare('INSERT OR REPLACE INTO provider_keys (id, shared_key) VALUES (?, ?)').bind(provider.id, newKey).run();
   return provider;
 }
 
 /** Update a provider's health snapshot + derived status. */
-export async function setHealth(kv: KV, id: string, health: HealthResult): Promise<Provider | undefined> {
-  const providers = await listProviders(kv);
-  const p = providers.find((x) => x.id === id);
-  if (!p) return undefined;
-  p.health = health;
-  p.status = health.status;
-  await saveAll(kv, providers);
-  return p;
+export async function setHealth(db: DB, id: string, health: HealthResult): Promise<Provider | undefined> {
+  const res = await db
+    .prepare('UPDATE providers SET health = ?, status = ? WHERE id = ?')
+    .bind(JSON.stringify(health), health.status, id)
+    .run();
+  if (!res.meta.changes) return undefined;
+  return getProvider(db, id);
 }
 
 /** Flag (or clear) a provider. A flagged provider is de-routed regardless of
  *  health; clearing restores it to normal routing. Enforcement lives here, not
  *  in the inference plane. */
-export async function setFlag(kv: KV, id: string, flagged: boolean, reason?: string): Promise<Provider | undefined> {
-  const providers = await listProviders(kv);
-  const p = providers.find((x) => x.id === id);
-  if (!p) return undefined;
-  if (flagged) {
-    p.flagged = true;
-    if (reason) p.flagReason = reason;
-  } else {
-    delete p.flagged;
-    delete p.flagReason;
-  }
-  await saveAll(kv, providers);
-  return p;
+export async function setFlag(db: DB, id: string, flagged: boolean, reason?: string): Promise<Provider | undefined> {
+  const res = await db
+    .prepare('UPDATE providers SET flagged = ?, flag_reason = ? WHERE id = ?')
+    .bind(flagged ? 1 : 0, flagged ? reason ?? null : null, id)
+    .run();
+  if (!res.meta.changes) return undefined;
+  return getProvider(db, id);
 }
 
-export async function removeProvider(kv: KV, id: string): Promise<boolean> {
-  const providers = await listProviders(kv);
-  const next = providers.filter((p) => p.id !== id);
-  if (next.length === providers.length) return false;
-  await saveAll(kv, next);
-  await kv.delete(keyKey(id));
-  return true;
+export async function removeProvider(db: DB, id: string): Promise<boolean> {
+  await db.prepare('DELETE FROM provider_keys WHERE id = ?').bind(id).run();
+  const res = await db.prepare('DELETE FROM providers WHERE id = ?').bind(id).run();
+  return !!res.meta.changes;
 }

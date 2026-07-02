@@ -82,10 +82,21 @@ RESP="$(curl -s -X POST "${GATEWAY}/v1/providers" -H 'Content-Type: application/
 
 if printf '%s' "$RESP" | grep -q '"provider"'; then
   PID="$(printf '%s' "$RESP" | grep -oE '"id":"[^"]+"' | head -1 | sed 's/"id":"//;s/"$//')"
+  # Save credentials locally — the only copy you can read back later (the gateway
+  # stores the key write-only). umask 077 → dir 700, file 600, so only you can read it.
+  CRED_DIR="${HOME}/.inference-marketplace"; CRED_FILE="${CRED_DIR}/${PID:-provider}.env"
+  ( umask 077; mkdir -p "$CRED_DIR" && cat > "$CRED_FILE" <<CRED
+PROVIDER_ID=${PID}
+SHARED_KEY=${KEY}
+GATEWAY=${GATEWAY}
+ENDPOINT=${URL}/v1
+CRED
+  ) 2>/dev/null && SAVED="$CRED_FILE" || SAVED=""
   echo "✅ Live & secured — direct calls without the key get 401. Keep this open to stay online (Ctrl+C to stop)."
   echo
   echo "   Provider id:  ${PID}"
   echo "   Shared key:   ${KEY}"
+  [ -n "$SAVED" ] && echo "   Saved to:     ${SAVED}"
   echo "   ↑ keep the key secret — it's how you (and only you) update this listing."
   echo "   Update name/models/payout without deleting & re-adding:"
   echo "     curl -X PATCH ${GATEWAY}/v1/providers/${PID} \\"

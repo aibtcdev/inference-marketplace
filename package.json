@@ -13,6 +13,7 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
+    "@stacks/encryption": "^7.5.0",
     "@stacks/transactions": "^7.5.0",
     "hono": "^4.7.0",
     "x402-stacks": "^2.0.3"
