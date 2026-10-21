@@ -17,20 +17,20 @@ export interface SkillContext {
   defaultPricePerMTok: number;
 }
 
-/** First callable model id across live providers, for the example snippets. */
-function exampleModelId(providers: Provider[]): string {
+/** First callable model id across live providers, or null when no provider is serving. */
+export function exampleModelId(providers: Provider[]): string | null {
   for (const p of providers) {
-    if (p.status === 'down') continue;
+    if (p.status === 'down' || p.flagged) continue;
     const m = p.models[0];
     if (m?.id) return m.id;
   }
-  return 'Qwen/Qwen2.5-7B-Instruct';
+  return null;
 }
 
 function modelsTable(providers: Provider[]): string {
   const rows: string[] = [];
   for (const p of providers) {
-    if (p.status === 'down') continue;
+    if (p.status === 'down' || p.flagged) continue;
     for (const m of p.models) {
       const ctx = m.contextLength ? m.contextLength.toLocaleString() : '—';
       rows.push(`| \`${m.id}\` | ${p.id} | ${p.acceptedToken} | ${ctx} | ${p.status} |`);
@@ -51,25 +51,12 @@ export function renderSkillMd(ctx: SkillContext): string {
   const walletEx = network === 'mainnet' ? 'SP...' : 'ST...';
   const walletPrefixes = network === 'mainnet' ? '`SP…` / `SM…`' : '`ST…` / `SN…`';
 
-  return `# Inference Marketplace — Agent Skill
+  const introLine = example
+    ? '\nEvery model id below is real and callable right now; every price is live.'
+    : '';
 
-Pay-per-request AI inference, settled in Bitcoin (**sBTC**) on Stacks via
-**x402**. Non-custodial: clients pay providers directly. This document is
-machine- and human-readable — read it once and you can either **(A) call
-inference and pay per request** or **(B) list your own model and get paid**.
-Every model id below is real and callable right now; every price is live.
-
-- **Base URL:** \`${origin}\`
-- **Network:** \`${network}\`
-- **Payment:** x402 v2 — tokens: \`sBTC\`, \`USDCx\`, \`STX\` (choose with header \`X-PAYMENT-TOKEN-TYPE\`)
-- **Live catalog (JSON):** \`GET ${origin}/v1/models\`
-- **Registration schema (JSON):** \`GET ${origin}/v1/schema\`
-
----
-
-## A. Call inference (pay per request)
-
-### One step — AIBTC MCP agents
+  const sectionACallBlock = example
+    ? `### One step — AIBTC MCP agents
 \`execute_x402_endpoint\` probes the 402, signs the payment, settles via the
 relay, and returns the completion:
 
@@ -96,7 +83,55 @@ curl -X POST ${origin}/v1/chat/completions \\
    settles and returns the completion. Each response carries a \`_marketplace\`
    receipt including the settlement \`txId\`.
 
-To pay in a specific token, send \`X-PAYMENT-TOKEN-TYPE: sBTC\` (or \`USDCx\` / \`STX\`).
+To pay in a specific token, send \`X-PAYMENT-TOKEN-TYPE: sBTC\` (or \`USDCx\` / \`STX\`).`
+    : `_No provider is live right now. \`GET /v1/models\` lists what is callable, and calls return \`400 Unknown model\` until a provider registers._
+
+### One step — AIBTC MCP agents
+Once a provider is live, pick a \`model\` id from \`GET ${origin}/v1/models\`. \`execute_x402_endpoint\` probes the 402, signs the payment, settles via the relay, and returns the completion:
+
+\`\`\`
+execute_x402_endpoint({
+  url: "${origin}/v1/chat/completions",
+  method: "POST",
+  data: {
+    model: "<model-id-from-/v1/models>",
+    messages: [{ role: "user", content: "Hello" }]
+  }
+})
+\`\`\`
+
+### Manual — any OpenAI-compatible client
+1. POST without payment (using a \`model\` id from \`GET ${origin}/v1/models\`) — when a provider is live you get **HTTP 402** with the price, \`payTo\`, \`nonce\`, \`asset\`:
+\`\`\`
+curl -X POST ${origin}/v1/chat/completions \\
+  -H 'Content-Type: application/json' \\
+  -d '{"model":"<model-id-from-/v1/models>","messages":[{"role":"user","content":"Hello"}]}'
+\`\`\`
+2. Sign a token transfer to \`payTo\` — **do not broadcast**.
+3. Retry with header \`payment-signature: <base64 PaymentPayloadV2>\`. The gateway
+   settles and returns the completion. Each response carries a \`_marketplace\`
+   receipt including the settlement \`txId\`.
+
+To pay in a specific token, send \`X-PAYMENT-TOKEN-TYPE: sBTC\` (or \`USDCx\` / \`STX\`).`;
+
+  return `# Inference Marketplace — Agent Skill
+
+Pay-per-request AI inference, settled in Bitcoin (**sBTC**) on Stacks via
+**x402**. Non-custodial: clients pay providers directly. This document is
+machine- and human-readable — read it once and you can either **(A) call
+inference and pay per request** or **(B) list your own model and get paid**.${introLine}
+
+- **Base URL:** \`${origin}\`
+- **Network:** \`${network}\`
+- **Payment:** x402 v2 — tokens: \`sBTC\`, \`USDCx\`, \`STX\` (choose with header \`X-PAYMENT-TOKEN-TYPE\`)
+- **Live catalog (JSON):** \`GET ${origin}/v1/models\`
+- **Registration schema (JSON):** \`GET ${origin}/v1/schema\`
+
+---
+
+## A. Call inference (pay per request)
+
+${sectionACallBlock}
 
 ### Models
 ${modelsTable(providers)}
