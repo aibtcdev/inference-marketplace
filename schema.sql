@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS providers (
   flagged       INTEGER NOT NULL DEFAULT 0,
   flag_reason   TEXT,
   health        TEXT,          -- JSON HealthResult, null until first check
+  -- checkedAt of the first failed check in the current outage; NULL while up.
+  -- Hidden from GET /v1/providers after 24 h, deleted by the cron after 7 d. Existing DBs:
+  --   ALTER TABLE providers ADD COLUMN down_since TEXT;
+  down_since    TEXT,
   models        TEXT NOT NULL, -- JSON array of ModelSpec
   reputation    TEXT,          -- JSON { agentId, score? }, null until feedback
   registered_at TEXT NOT NULL

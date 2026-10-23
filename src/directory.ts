@@ -40,6 +40,8 @@ export interface Provider {
   health: HealthResult | null;
   /** Marketplace status, derived from health. */
   status: 'pending' | 'live' | 'degraded' | 'down';
+  /** When the current outage started (first failed check). Absent while up. */
+  downSince?: string;
   /** Flagged by the marketplace (cheating / abuse). Orthogonal to health: a
    *  flagged provider is de-routed regardless of health, and stays flagged
    *  across health checks until explicitly cleared. */
@@ -148,6 +150,7 @@ interface ProviderRow {
   flagged: number;
   flag_reason: string | null;
   health: string | null;
+  down_since: string | null;
   models: string;
   reputation: string | null;
   registered_at: string;
@@ -167,6 +170,7 @@ function rowToProvider(r: ProviderRow): Provider {
     secured: !!r.secured,
     health: r.health ? (JSON.parse(r.health) as HealthResult) : null,
     status: r.status as Provider['status'],
+    ...(r.down_since ? { downSince: r.down_since } : {}),
     ...(r.flagged ? { flagged: true } : {}),
     ...(r.flag_reason ? { flagReason: r.flag_reason } : {}),
     reputation: r.reputation ? (JSON.parse(r.reputation) as Provider['reputation']) : null,
@@ -394,9 +398,14 @@ export async function commitUpdate(db: DB, provider: Provider, newKey?: string):
 
 /** Update a provider's health snapshot + derived status. */
 export async function setHealth(db: DB, id: string, health: HealthResult): Promise<Provider | undefined> {
+  // down_since keeps the first failure of an outage; any live/degraded check clears it.
   const res = await db
-    .prepare('UPDATE providers SET health = ?, status = ? WHERE id = ?')
-    .bind(JSON.stringify(health), health.status, id)
+    .prepare(
+      `UPDATE providers SET health = ?, status = ?,
+         down_since = CASE WHEN ? = 'down' THEN COALESCE(down_since, ?) ELSE NULL END
+       WHERE id = ?`,
+    )
+    .bind(JSON.stringify(health), health.status, health.status, health.checkedAt, id)
     .run();
   if (!res.meta.changes) return undefined;
   return getProvider(db, id);
@@ -418,4 +427,26 @@ export async function removeProvider(db: DB, id: string): Promise<boolean> {
   await db.prepare('DELETE FROM provider_keys WHERE id = ?').bind(id).run();
   const res = await db.prepare('DELETE FROM providers WHERE id = ?').bind(id).run();
   return !!res.meta.changes;
+}
+
+/** Down this long → left out of the default provider list (still listed with ?include=stale). */
+export const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+/** Down this long → deleted by the cron. Leaves an owner time to PATCH a moved endpoint. */
+export const EXPIRE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Down for more than STALE_AFTER_MS. Nothing is deleted; one good check brings it back. */
+export function isStale(p: Provider, now: Date = new Date()): boolean {
+  return !!p.downSince && Date.parse(p.downSince) < now.getTime() - STALE_AFTER_MS;
+}
+
+/** Delete providers (and their keys) down for more than EXPIRE_AFTER_MS. Returns the removed ids. */
+export async function expireDeadProviders(db: DB, now: Date = new Date()): Promise<string[]> {
+  const cutoff = new Date(now.getTime() - EXPIRE_AFTER_MS).toISOString();
+  const { results } = await db
+    .prepare('SELECT id FROM providers WHERE down_since IS NOT NULL AND down_since < ?')
+    .bind(cutoff)
+    .all<{ id: string }>();
+  const ids = (results ?? []).map((r) => r.id);
+  for (const id of ids) await removeProvider(db, id);
+  return ids;
 }
