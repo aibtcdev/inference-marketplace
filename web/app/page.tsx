@@ -5,8 +5,8 @@ import type { FormEvent } from "react";
 import Link from "next/link";
 import { toast, Toaster } from "sonner";
 import { addressNetwork, connectWallet, disconnectWallet, signAuthHeaders, useWalletAddresses } from "./wallet";
-import { GATEWAY, STATUS, trunc } from "./shared";
-import type { Provider } from "./shared";
+import { GATEWAY, STATUS, trunc, formatPrice, priceToBaseUnits, PriceInput } from "./shared";
+import type { Provider, PayToken } from "./shared";
 
 // The models we run on-chain legions for. A provider picks one at registration so
 // it maps 1:1 to its legion (fees/treasury/gov). Keep in sync with the gateway's
@@ -21,15 +21,6 @@ const SUPPORTED_MODELS: { id: string; label: string }[] = [
   { id: "mistralai/Mistral-Nemo-Instruct-2407", label: "Mistral Nemo" },
   { id: "google/Gemma-4-9b-it", label: "Gemma 4 9B" },
 ];
-// x402 amounts are in BASE UNITS (sBTC: 1 = 1 sat = 1e-8 BTC; USDCx/STX: 1e-6).
-function formatPrice(amount: string, asset: string): string {
-  const n = Number(amount);
-  if (!Number.isFinite(n)) return `${amount} ${asset}`;
-  if (/sbtc/i.test(asset)) return `${n.toLocaleString()} sat${n === 1 ? "" : "s"}`;
-  if (/usdcx/i.test(asset)) return `${(n / 1e6).toFixed(6)} USDCx`;
-  if (asset === "STX") return `${(n / 1e6).toFixed(6)} STX`;
-  return `${amount} ${asset}`;
-}
 
 export default function Home() {
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -188,54 +179,7 @@ export default function Home() {
             <Link href="/dashboard" className="shrink-0 rounded-lg border border-[#f7931a]/40 bg-[#f7931a]/10 px-3 py-1.5 text-xs font-medium text-[#f7931a] hover:bg-[#f7931a]/15">Open dashboard →</Link>
           </div>
         )}
-        <div className="mb-4 flex items-baseline justify-between">
-          <h2 className="text-lg font-medium">Providers</h2>
-          <button
-            onClick={() => load()}
-            disabled={refreshing}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[#23262d] bg-[#101216] px-3 py-1.5 text-xs text-[#9aa3af] transition-colors hover:text-[#f2f4f7] disabled:opacity-60"
-          >
-            <span className={refreshing ? "inline-block h-3 w-3 animate-spin rounded-full border-2 border-[#f7931a] border-t-transparent" : ""}>{refreshing ? "" : "↻"}</span>
-            {refreshing ? "Refreshing…" : "Refresh"}
-          </button>
-        </div>
-
-        {providers.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-[#23262d] bg-[#101216] p-12 text-center">
-            <p className="text-[#9aa3af]">No providers yet.</p>
-            <button onClick={openRegister} className="mt-2 text-sm font-medium text-[#f7931a] hover:opacity-90">Register the first endpoint →</button>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {sorted.map((p) => {
-              const st = STATUS[p.status] ?? STATUS.pending;
-              return (
-                <button key={p.id} onClick={() => setDetail(p)} className="block w-full rounded-xl border border-[#23262d] bg-[#101216] p-4 text-left transition-colors hover:border-[#33373f]">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <span className="grid h-9 w-9 place-items-center rounded-lg bg-[#f7931a]/12 text-sm font-semibold text-[#f7931a]">{p.name.charAt(0).toUpperCase()}</span>
-                      <div>
-                        <div className="font-medium">{p.name}</div>
-                        <div className="mono mt-0.5 break-all text-xs text-[#9aa3af]">{p.endpoint}</div>
-                      </div>
-                    </div>
-                    <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-[#23262d] bg-[#15181d] px-2.5 py-1 text-xs">
-                      <span className="h-2 w-2 rounded-full" style={{ background: st.c }} />
-                      <span style={{ color: st.c }}>{st.label}</span>
-                      {p.health?.latencyMs != null && p.status !== "down" && <span className="text-[#9aa3af]">· {p.health.latencyMs}ms</span>}
-                    </span>
-                  </div>
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    {p.models.map((m) => (
-                      <span key={m.id} className="rounded-md border border-[#23262d] bg-[#15181d] px-2 py-0.5 text-xs text-[#cfd5dd]">{m.id}</span>
-                    ))}
-                  </div>
-                  <div className="mt-3 text-xs text-[#9aa3af]">pays to <span className="mono text-[#cfd5dd]">{trunc(p.payoutAddress)}</span> · tap to inspect &amp; test →</div>
-                </button>
-              );
-            })}
-          </div>
-        )}
+        <ProviderList providers={sorted} refreshing={refreshing} onRefresh={load} onOpen={setDetail} onRegister={openRegister} />
       </main>
 
       <footer className="border-t border-[#23262d]">
@@ -245,6 +189,169 @@ export default function Home() {
       {modal && <RegisterModal onClose={() => setModal(false)} onDone={load} network={network} wallet={wallet} onConnect={onConnect} />}
       {detail && <ProviderDetail provider={detail} onClose={() => setDetail(null)} />}
     </div>
+  );
+}
+
+// What each status means, per the gateway's health check (GET {endpoint}/models
+// every 5 min; see src/health.ts).
+const STATUS_HINT: Record<string, string> = {
+  live: "Answered the last health check in under 4s",
+  degraded: "Answered the last health check, but slowly (4–8s)",
+  down: "Didn't answer the last health check",
+  pending: "Not checked yet",
+};
+const hostOf = (endpoint: string) => { try { return new URL(endpoint).host; } catch { return endpoint; } };
+const shortModel = (id: string) => id.split("/").pop() ?? id;
+
+type Filter = "all" | "live" | "degraded" | "down";
+
+function ProviderList({ providers, refreshing, onRefresh, onOpen, onRegister }: {
+  providers: Provider[]; refreshing: boolean; onRefresh: () => void; onOpen: (p: Provider) => void; onRegister: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
+  const [showOffline, setShowOffline] = useState(false);
+
+  const q = query.trim().toLowerCase();
+  const matches = (p: Provider) => !q
+    || p.name.toLowerCase().includes(q)
+    || p.endpoint.toLowerCase().includes(q)
+    || p.payoutAddress.toLowerCase().includes(q)
+    || p.models.some((m) => m.id.toLowerCase().includes(q));
+  const searched = providers.filter(matches);
+  const counts: Record<Filter, number> = {
+    all: searched.length,
+    live: searched.filter((p) => p.status === "live").length,
+    degraded: searched.filter((p) => p.status === "degraded").length,
+    down: searched.filter((p) => p.status === "down").length,
+  };
+  const visible = filter === "all" ? searched : searched.filter((p) => p.status === filter);
+  // In "All", offline providers are folded away so working ones lead the list.
+  const online = filter === "all" ? visible.filter((p) => p.status !== "down") : visible;
+  const offline = filter === "all" ? visible.filter((p) => p.status === "down") : [];
+
+  return (
+    <section>
+      <div className="mb-3 flex items-baseline justify-between">
+        <h2 className="text-lg font-medium">Providers</h2>
+        <button
+          onClick={onRefresh}
+          disabled={refreshing}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-[#23262d] bg-[#101216] px-3 py-1.5 text-xs text-[#9aa3af] transition-colors hover:text-[#f2f4f7] disabled:opacity-60"
+        >
+          <span className={refreshing ? "inline-block h-3 w-3 animate-spin rounded-full border-2 border-[#f7931a] border-t-transparent" : ""}>{refreshing ? "" : "↻"}</span>
+          {refreshing ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+
+      {providers.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-[#23262d] bg-[#101216] p-12 text-center">
+          <p className="text-[#9aa3af]">No providers yet.</p>
+          <button onClick={onRegister} className="mt-2 text-sm font-medium text-[#f7931a] hover:opacity-90">Register the first endpoint →</button>
+        </div>
+      ) : (
+        <>
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex gap-1 overflow-x-auto rounded-lg border border-[#23262d] bg-[#0b0d10] p-1 text-xs">
+              {(["all", "live", "degraded", "down"] as const).map((f) => {
+                const c = f === "all" ? undefined : STATUS[f].c;
+                return (
+                  <button
+                    key={f}
+                    onClick={() => setFilter(f)}
+                    title={f === "all" ? undefined : STATUS_HINT[f]}
+                    className={`flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 capitalize ${filter === f ? "bg-[#15181d] text-[#f2f4f7]" : "text-[#9aa3af] hover:text-[#cfd5dd]"}`}
+                  >
+                    {c && <span className="h-1.5 w-1.5 rounded-full" style={{ background: c }} />}
+                    {f}
+                    <span className="tabular-nums text-[#5b626c]">{counts[f]}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search name, model, wallet…"
+              className="w-full rounded-lg border border-[#23262d] bg-[#0b0d10] px-3 py-2 text-sm outline-none placeholder:text-[#5b626c] focus:border-[#f7931a] sm:w-64"
+            />
+          </div>
+
+          {online.length === 0 && offline.length === 0 && (
+            <p className="rounded-xl border border-dashed border-[#23262d] bg-[#101216] px-4 py-8 text-center text-sm text-[#9aa3af]">No providers match.</p>
+          )}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {online.map((p) => <ProviderCard key={p.id} p={p} onOpen={onOpen} />)}
+          </div>
+          {offline.length > 0 && (
+            <>
+              <button
+                onClick={() => setShowOffline((v) => !v)}
+                className="mt-4 flex items-center gap-2 text-xs text-[#9aa3af] hover:text-[#f2f4f7]"
+              >
+                <span>{showOffline ? "▾" : "▸"}</span>
+                {showOffline ? "Hide" : "Show"} {offline.length} offline
+              </button>
+              {showOffline && (
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {offline.map((p) => <ProviderCard key={p.id} p={p} onOpen={onOpen} />)}
+                </div>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function ProviderCard({ p, onOpen }: { p: Provider; onOpen: (p: Provider) => void }) {
+  const st = STATUS[p.status] ?? STATUS.pending;
+  const down = p.status === "down";
+  const shown = p.models.slice(0, 3);
+  const rest = p.models.length - shown.length;
+  const latency = down || p.health?.latencyMs == null ? "—"
+    : p.health.latencyMs < 1000 ? `${p.health.latencyMs}ms` : `${(p.health.latencyMs / 1000).toFixed(1)}s`;
+  return (
+    <button
+      onClick={() => onOpen(p)}
+      className={`group flex h-full w-full min-w-0 flex-col rounded-xl border border-[#23262d] bg-[#101216] p-4 text-left transition-colors hover:border-[#f7931a]/40 hover:bg-[#121419] ${down ? "opacity-55" : ""}`}
+    >
+      <div className="flex items-start gap-3">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[#f7931a]/12 text-sm font-semibold text-[#f7931a]">{p.name.charAt(0).toUpperCase()}</span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium" title={p.name}>{p.name}</div>
+          <div className="mono truncate text-[11px] text-[#5b626c]" title={p.endpoint}>{hostOf(p.endpoint)}</div>
+        </div>
+        <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-[#23262d] bg-[#15181d] px-2 py-0.5 text-[11px]" title={STATUS_HINT[p.status]}>
+          <span className="h-1.5 w-1.5 rounded-full" style={{ background: st.c }} />
+          <span style={{ color: st.c }}>{st.label}</span>
+        </span>
+      </div>
+
+      <div className="mb-3 mt-3 flex flex-wrap items-center gap-1" title={p.models.map((m) => m.id).join("\n")}>
+        {shown.map((m) => (
+          <span key={m.id} className="max-w-full truncate rounded-md border border-[#23262d] bg-[#0b0d10] px-1.5 py-0.5 text-[11px] text-[#cfd5dd]">{shortModel(m.id)}</span>
+        ))}
+        {rest > 0 && <span className="px-1 text-[11px] text-[#9aa3af]">+{rest} more</span>}
+      </div>
+
+      {/* pinned to the bottom so cards in a row line up regardless of model count */}
+      <div className="mt-auto grid grid-cols-3 gap-2 border-t border-[#23262d] pt-3 text-[11px]">
+        <div>
+          <div className="text-[#5b626c]">Per request</div>
+          <div className={`tabular-nums ${p.pricePerRequest ? "text-[#cfd5dd]" : "text-[#5b626c]"}`}>{formatPrice(p.pricePerRequest, p.acceptedToken)}</div>
+        </div>
+        <div>
+          <div className="text-[#5b626c]">Latency</div>
+          <div className="tabular-nums text-[#cfd5dd]">{latency}</div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-[#5b626c]">Paid to</div>
+          <div className="mono truncate text-[#cfd5dd]" title={p.payoutAddress}>{trunc(p.payoutAddress)}</div>
+        </div>
+      </div>
+    </button>
   );
 }
 
@@ -303,26 +410,9 @@ function ProviderDetail({ provider: p, onClose }: { provider: Provider; onClose:
     finally { setRunning(false); }
   }
 
-  // Probe our wrapped route's 402 to show the real price clients pay.
-  const [quote, setQuote] = useState<{ amount: string; asset: string; payTo: string } | null>(null);
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch(`${GATEWAY}/v1/route/${p.id}/chat/completions`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 256 }),
-        });
-        if (r.status === 402) { const d = await r.json(); const a = d.accepts?.[0]; if (a) setQuote({ amount: a.amount, asset: a.asset, payTo: a.payTo }); }
-      } catch { /* gateway offline */ }
-    })();
-  }, [p.id, modelId]);
-
   const routeUrl = `${GATEWAY}/v1/route/${p.id}/chat/completions`;
   const mcp = `execute_x402_endpoint({\n  url: "${routeUrl}",\n  method: "POST",\n  data: {\n    model: "${modelId}",\n    messages: [{ role: "user", content: ${JSON.stringify(prompt)} }]\n  }\n})`;
   const curl = `curl -X POST ${routeUrl} \\\n  -H 'Content-Type: application/json' \\\n  -d '${JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }] })}'`;
-
-  // Fee-free: every paid call goes 100% to the provider (direct, non-custodial).
-  const split = quote ? { provider: quote.amount } : null;
 
   return (
     <div className="overlay-in fixed inset-0 z-50 bg-black/65 backdrop-blur-sm" onClick={onClose}>
@@ -360,17 +450,16 @@ function ProviderDetail({ provider: p, onClose }: { provider: Provider; onClose:
           {/* signature: fee-free — 100% to the provider, shown as a full bar */}
           <div className="mt-5 rounded-xl border border-[#23262d] bg-[#101216] p-4">
             <div className="flex items-baseline justify-between">
-              <h3 className="text-xs uppercase tracking-wider text-[#9aa3af]">Per paid call</h3>
-              <span className="wide text-base text-[#f7931a]">{quote ? `≈ ${formatPrice(quote.amount, quote.asset)}` : "price when reachable"}</span>
+              <h3 className="text-xs uppercase tracking-wider text-[#9aa3af]">Per request</h3>
+              <span className="wide text-base text-[#f7931a]">{formatPrice(p.pricePerRequest, p.acceptedToken)}</span>
             </div>
             <div className="mt-3 flex h-2.5 gap-0.5 overflow-hidden rounded-full">
               <div className="h-full rounded-full bg-[#f7931a]" style={{ width: "100%" }} />
             </div>
             <div className="mt-3 text-xs">
               <div className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#f7931a]" /><span className="text-[#f2f4f7]">100% · provider</span></div>
-              {split && <div className="mono mt-1 text-[#9aa3af]">{formatPrice(split.provider, quote!.asset)}</div>}
             </div>
-            <p className="mt-3 text-[11px] leading-relaxed text-[#5b626c]">Settled on-chain and non-custodial — the provider is paid directly through our x402 wrapper.</p>
+            <p className="mt-3 text-[11px] leading-relaxed text-[#5b626c]">A flat price the provider set — every call pays exactly this, whatever its length. Settled on-chain and non-custodial, directly to the provider through our x402 wrapper.</p>
           </div>
 
           {/* model capabilities */}
@@ -386,7 +475,6 @@ function ProviderDetail({ provider: p, onClose }: { provider: Provider; onClose:
                   {(m.capabilities ?? []).map((c) => (
                     <span key={c} className="rounded-md border border-[#23262d] bg-[#0b0d10] px-2 py-0.5 text-xs text-[#7da2ff]">{c}</span>
                   ))}
-                  {m.pricePerMTokenUsd != null && <span className="text-xs text-[#9aa3af]">${m.pricePerMTokenUsd}/Mtok</span>}
                 </div>
               </div>
             ))}
@@ -476,7 +564,10 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
   // is pasted — the manifest carries name/wallet/models itself).
   const [pf, setPf] = useState({ name: "", models: "" });
   // Token this provider is paid in (applies to both tabs). Client pays in it.
-  const [payToken, setPayToken] = useState<"sBTC" | "USDCx">("sBTC");
+  const [payToken, setPayToken] = useState<PayToken>("sBTC");
+  // Flat price per request, typed in the token's unit (sats, or USDCx).
+  const [price, setPrice] = useState("");
+  const priceBase = priceToBaseUnits(price, payToken);
 
   // After the user runs the connect command on their machine, the script
   // registers itself — so we poll the directory and confirm the moment the
@@ -529,14 +620,14 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
   // supplied inline. We send the inline fields verbatim — the gateway validates
   // the models against Hugging Face and verifies the endpoint before listing.
   const pubIsManifest = src.trim().endsWith(".json");
-  const pubReady = !!payout && !!src.trim() && (pubIsManifest || !!(pf.name.trim() && pf.models.trim()));
+  const pubReady = !!payout && !!src.trim() && !!priceBase && (pubIsManifest || !!(pf.name.trim() && pf.models.trim()));
 
   function submitPublic(e: FormEvent) {
     e.preventDefault();
     const url = src.trim();
     const apiKey = pubKey.trim() || undefined;
     if (pubIsManifest) {
-      sendPublic({ manifestUrl: url, payoutAddress: payout, acceptedToken: payToken, ...(apiKey ? { apiKey } : {}) });
+      sendPublic({ manifestUrl: url, payoutAddress: payout, acceptedToken: payToken, pricePerRequest: priceBase, ...(apiKey ? { apiKey } : {}) });
       return;
     }
     const models = pf.models.split(",").map((m) => m.trim()).filter(Boolean);
@@ -545,6 +636,7 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
       endpoint: url,
       payoutAddress: payout,
       acceptedToken: payToken,
+      pricePerRequest: priceBase,
       models,
       ...(apiKey ? { apiKey } : {}),
     });
@@ -558,7 +650,7 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
   const name = lf.name.trim();
   const port = lf.port.trim() || "11434";
   const models = lf.models.split(",").map((m) => m.trim()).filter(Boolean).join(",");
-  const ready = !!(name && payout && models);
+  const ready = !!(name && payout && models && priceBase);
   const modelId = models.split(",")[0]?.trim() || "";
   // A self-contained prompt the user pastes into Claude Code (or any AI agent with
   // the AIBTC MCP): it hosts the model, tunnels it, and registers with a wallet
@@ -577,7 +669,7 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
        Timestamp: <now>
    - Get my public key and ${network} address from get_wallet_info.
    - POST with headers X-Stacks-Signature, X-Stacks-Public-Key, X-Stacks-Timestamp and body:
-       {"name":"${name || "My node"}","endpoint":"<endpoint>","payoutAddress":"${payout || "<wallet>"}","acceptedToken":"${payToken}","models":["${modelId || "<model>"}"]}
+       {"name":"${name || "My node"}","endpoint":"<endpoint>","payoutAddress":"${payout || "<wallet>"}","acceptedToken":"${payToken}","pricePerRequest":"${priceBase ?? "<price>"}","models":["${modelId || "<model>"}"]}
 
 Keep the tunnel running and tell me when my node shows up in the marketplace.`;
 
@@ -626,10 +718,18 @@ Keep the tunnel running and tell me when my node shows up in the marketplace.`;
 
         <label className="mt-3 block">
           <span className="mb-1.5 block text-xs text-[#9aa3af]">Get paid in</span>
-          <select value={payToken} onChange={(e) => setPayToken(e.target.value as "sBTC" | "USDCx")} className={inputCls}>
+          <select value={payToken} onChange={(e) => setPayToken(e.target.value as PayToken)} className={inputCls}>
             <option value="sBTC">sBTC</option>
             <option value="USDCx">USDCx</option>
           </select>
+        </label>
+
+        <label className="mt-3 block">
+          <span className="mb-1.5 block text-xs text-[#9aa3af]">Price per request</span>
+          <PriceInput value={price} token={payToken} onChange={setPrice} className={inputCls} />
+          <span className="mt-1 block text-[11px] text-[#5b626c]">
+            {priceBase ? `Every call pays you exactly ${formatPrice(priceBase, payToken)}.` : `Required — ${payToken === "sBTC" ? "whole sats" : "USDCx, up to 6 decimals"}. x402 charges one flat amount per request.`}
+          </span>
         </label>
 
         {tab === "local" ? (
@@ -655,7 +755,7 @@ Keep the tunnel running and tell me when my node shows up in the marketplace.`;
             {ready ? (
               <Snippet label="copy → paste into your AI agent" code={agentPrompt} />
             ) : (
-              <div className="rounded-lg border border-dashed border-[#2a2e36] bg-[#0b0d10] px-3 py-3 text-xs text-[#5b626c]">Fill name, wallet &amp; model above — your prompt appears here.</div>
+              <div className="rounded-lg border border-dashed border-[#2a2e36] bg-[#0b0d10] px-3 py-3 text-xs text-[#5b626c]">Fill name, wallet, model &amp; price above — your prompt appears here.</div>
             )}
             <p className="mt-1.5 rounded-md border border-[#35c759]/25 bg-[#35c759]/[0.06] px-2.5 py-2 text-[11px] text-[#9aa3af]">
               No wallet keys leave your machine — the agent signs locally with your wallet. No model yet? The agent pulls one for you.
