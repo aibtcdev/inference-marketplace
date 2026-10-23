@@ -6,10 +6,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as directory from '../src/directory';
 
-const REPO = process.env.REPO!;
+const SCHEMA = new URL('../schema.sql', import.meta.url);
 function fakeD1() {
   const db = new DatabaseSync(':memory:');
-  db.exec(readFileSync(`${REPO}/schema.sql`, 'utf8'));
+  db.exec(readFileSync(SCHEMA, 'utf8'));
   const prep = (sql: string) => {
     let args: unknown[] = [];
     const st = db.prepare(sql);
@@ -25,7 +25,7 @@ function fakeD1() {
 }
 const A = 'SP2SF7ZNAF0SPZ8JTRHMZMZEWDYZ7V9MWK1KS4PB2', B = 'SP7KSYVD0FMKJQKFWXMHPVTG9EN8J21QDJFY4PXN';
 const reg = (name: string, url: string, payout = A) =>
-  ({ name, endpoint: url, payoutAddress: payout, models: ['Qwen/Qwen2.5-0.5B-Instruct'], network: 'mainnet' as const });
+  ({ name, endpoint: url, payoutAddress: payout, models: ['Qwen/Qwen2.5-0.5B-Instruct'], network: 'mainnet' as const, pricePerRequest: 5 });
 
 test('re-registering the same wallet+name under a new tunnel URL is refused with the existing id', async () => {
   const db = fakeD1();
@@ -44,4 +44,13 @@ test('different wallet, or different name, still registers; exact endpoint dupli
   await directory.registerProvider(db, reg('Other Name', 'https://ddd.lhr.life/v1'));
   assert.equal((await directory.listProviders(db)).length, 3);
   await assert.rejects(directory.registerProvider(db, reg('Third', 'https://aaa.lhr.life/v1')), /already registered/);
+});
+
+test('the PATCH path the 409 points at still accepts a new endpoint for the same row', async () => {
+  const db = fakeD1();
+  const first = await directory.registerProvider(db, reg('Agenthub Inference', 'https://aaa.lhr.life/v1'));
+  const prepared = await directory.prepareUpdate(db, first.id, { endpoint: 'https://bbb.lhr.life/v1' });
+  assert.ok(prepared);
+  assert.equal(prepared.provider.endpoint, 'https://bbb.lhr.life/v1');
+  assert.equal(prepared.endpointChanged, true);
 });

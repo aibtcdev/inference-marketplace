@@ -347,18 +347,6 @@ export async function prepareUpdate(db: DB, id: string, patch: ProviderUpdate): 
     if (endpoint !== current.endpoint) {
       const dupe = await db.prepare('SELECT id FROM providers WHERE endpoint = ? AND id != ?').bind(endpoint, id).first();
       if (dupe) throw new Error('this endpoint is already registered');
-
-  // Same wallet + same name = the same provider under a new URL. Point at PATCH instead of adding a row.
-  const same = await db
-    .prepare('SELECT id FROM providers WHERE payout_address = ? AND lower(name) = lower(?)')
-    .bind(payoutAddress, name)
-    .first<{ id: string }>();
-  if (same) {
-    throw new DuplicateProviderError(
-      same.id,
-      `${payoutAddress} already lists "${name}" as ${same.id}; update its endpoint with PATCH /v1/providers/${same.id} instead of registering a new row`,
-    );
-  }
       next.endpoint = endpoint;
       endpointChanged = true;
     }
