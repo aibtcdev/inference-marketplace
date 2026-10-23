@@ -51,7 +51,7 @@ marketplace itself (payment settles to each provider, so the gateway holds none)
 | GET | `/` | free | Service + payment info |
 | GET | `/health` | free | Health check |
 | GET | `/skill.md` | free | Agent skill manifest (read this first) |
-| GET | `/v1/models` | free | Live catalog — every model from a registered provider + reference price |
+| GET | `/v1/models` | free | Live catalog — every model from a registered provider + its per-request price |
 | GET | `/v1/providers` | free | Registered providers + health + `flagged` status |
 | GET | `/v1/schema` | free | Provider registration JSON Schema |
 | POST | `/v1/chat/completions` | **paid** | OpenAI-compatible; routes to the model's provider |
@@ -89,17 +89,12 @@ funds.
 
 ## Pricing
 
-```
-price_usd  = (prompt_tokens + max_tokens)/1e6 × pricePerMTokenUsd
-price_base = ceil(price_usd / rate)     # → sBTC sats (1e-8) or USDCx (1e-6)
-```
-
-Each provider declares `pricePerMTokenUsd` per model (or the marketplace default).
-The USD price is converted to the provider's chosen token at the **live** Coinbase
-rate, so the real price stays stable as BTC moves. sBTC has a 1-sat floor
-(~$0.001); for sub-cent calls, **USDCx** (6 decimals) prices exactly. Each
-response carries a `_marketplace` receipt with the provider, `paidTo`, and the
-settlement `txId`.
+Each provider sets one flat **`pricePerRequest`** (required) in the token it is
+paid in, as a whole number of that token's smallest unit: **sats** for sBTC
+(`"5"` = 5 sats), **0.000001 USDCx** for USDCx (`"2000"` = 0.002 USDCx). The 402
+asks for exactly that amount — no token estimate, no currency conversion, no
+default. Each response carries a `_marketplace` receipt with the provider,
+`paidTo`, and the settlement `txId`.
 
 ## x402 payment flow
 
@@ -127,7 +122,6 @@ Agents on AIBTC pay automatically via `execute_x402_endpoint` (probe → sign �
 | `src/x402-middleware.ts` | x402 settlement (fixed + dynamic) via the AIBTC relay |
 | `src/directory.ts` | Provider directory (D1): register / verify / update / flag |
 | `src/schema.ts` | Registration contract + accepted payout tokens |
-| `src/pricing.ts` | USD → live sBTC/USDCx conversion |
 | `src/upstream.ts` | OpenAI-compatible client that forwards to a provider's endpoint |
 | `src/health.ts` | Endpoint health + inference verification (cron) |
 | `src/wallet-auth.ts` | Wallet-signature auth for provider self-service |

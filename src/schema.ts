@@ -22,8 +22,6 @@ export interface ModelSpec {
   name?: string;
   contextLength?: number;
   capabilities?: Capability[];
-  /** Provider's price per 1M tokens in USD (optional; informational). */
-  pricePerMTokenUsd?: number;
 }
 
 export interface ProviderRegistration {
@@ -36,6 +34,9 @@ export interface ProviderRegistration {
   api: "openai-chat";
   /** Token this provider is paid in (default sBTC). */
   acceptedToken?: PayoutToken;
+  /** Flat price per request, in the smallest unit of `acceptedToken`
+   *  (sBTC: sats; USDCx: 0.000001 USDCx). This is the x402 `amount` charged. */
+  pricePerRequest: string;
   models: ModelSpec[];
   description?: string;
 }
@@ -46,7 +47,7 @@ export const REGISTRATION_SCHEMA = {
   $id: "https://inference-marketplace/schemas/provider-registration",
   title: "ProviderRegistration",
   type: "object",
-  required: ["name", "endpoint", "payoutAddress", "models"],
+  required: ["name", "endpoint", "payoutAddress", "pricePerRequest", "models"],
   additionalProperties: false,
   properties: {
     name: { type: "string", minLength: 1, maxLength: 64, description: "Display name" },
@@ -67,6 +68,12 @@ export const REGISTRATION_SCHEMA = {
       default: DEFAULT_PAYOUT_TOKEN,
       description: "Token you are paid in: sBTC or USDCx",
     },
+    pricePerRequest: {
+      type: ["string", "integer"],
+      pattern: "^[1-9][0-9]*$",
+      minimum: 1,
+      description: "Flat price per request in the smallest unit of acceptedToken — sats for sBTC (5 = 5 sats), 0.000001 USDCx for USDCx (2000 = 0.002 USDCx)",
+    },
     description: { type: "string", maxLength: 280 },
     models: {
       type: "array",
@@ -85,7 +92,6 @@ export const REGISTRATION_SCHEMA = {
             items: { type: "string", enum: [...CAPABILITIES] },
             uniqueItems: true,
           },
-          pricePerMTokenUsd: { type: "number", minimum: 0 },
         },
       },
     },
@@ -108,10 +114,23 @@ export function normalizeModels(input: unknown): ModelSpec[] {
           ...(spec.name ? { name: spec.name } : {}),
           ...(typeof spec.contextLength === "number" ? { contextLength: spec.contextLength } : {}),
           ...(caps && caps.length ? { capabilities: caps } : {}),
-          ...(typeof spec.pricePerMTokenUsd === "number" ? { pricePerMTokenUsd: spec.pricePerMTokenUsd } : {}),
         };
       }
       return null;
     })
     .filter((m): m is ModelSpec => m !== null && m.id.length > 0);
+}
+
+/** Validate a per-request price: a positive whole number of the token's
+ *  smallest unit, returned as a decimal string (the x402 `amount`). Rejects
+ *  decimals rather than guessing, so "0.002" (meant as USDCx) can't silently
+ *  become a different price. */
+export function normalizePricePerRequest(input: unknown, token: PayoutToken): string {
+  const unit = token === "sBTC" ? "sats" : "0.000001 USDCx units (0.002 USDCx = 2000)";
+  if (input == null || input === "") throw new Error(`pricePerRequest is required — your price per request in ${unit}`);
+  const raw = String(input).trim();
+  if (!/^[0-9]+$/.test(raw)) throw new Error(`pricePerRequest must be a whole number of ${unit}`);
+  const v = BigInt(raw);
+  if (v < 1n) throw new Error("pricePerRequest must be at least 1");
+  return v.toString();
 }

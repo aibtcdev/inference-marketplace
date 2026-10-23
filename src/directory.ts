@@ -14,7 +14,7 @@
 
 import type { HealthResult } from './health';
 import type { ModelSpec, PayoutToken } from './schema';
-import { normalizeModels, PAYOUT_TOKENS, DEFAULT_PAYOUT_TOKEN } from './schema';
+import { normalizeModels, normalizePricePerRequest, PAYOUT_TOKENS, DEFAULT_PAYOUT_TOKEN } from './schema';
 
 export interface Provider {
   id: string;
@@ -27,6 +27,10 @@ export interface Provider {
   payoutAddress: string;
   /** Token this provider is paid in ('sBTC' or 'USDCx'). Clients must pay in it. */
   acceptedToken: PayoutToken;
+  /** Flat price per request in the smallest unit of `acceptedToken` (sats for
+   *  sBTC, 0.000001 USDCx for USDCx) — charged as-is as the x402 amount. null
+   *  only for rows registered before per-request pricing; those aren't routed. */
+  pricePerRequest: string | null;
   /** Structured per-model capability specs the provider declares. */
   models: ModelSpec[];
   description?: string;
@@ -54,6 +58,8 @@ export interface ProviderInput {
   api?: string;
   /** Token to be paid in ('sBTC' or 'USDCx'). Defaults to sBTC. */
   acceptedToken?: PayoutToken;
+  /** Required. Price per request in the smallest unit of acceptedToken. */
+  pricePerRequest?: string | number;
   models: Array<string | ModelSpec>;
   description?: string;
   /** Shared secret the endpoint requires; stored server-side, never returned. */
@@ -135,6 +141,7 @@ interface ProviderRow {
   api: string;
   payout_address: string;
   accepted_token: string | null;
+  price_per_request: string | null;
   description: string | null;
   secured: number;
   status: string;
@@ -154,6 +161,7 @@ function rowToProvider(r: ProviderRow): Provider {
     api: r.api,
     payoutAddress: r.payout_address,
     acceptedToken: normalizePayoutToken(r.accepted_token),
+    pricePerRequest: r.price_per_request ?? null,
     models: JSON.parse(r.models) as ModelSpec[],
     ...(r.description ? { description: r.description } : {}),
     secured: !!r.secured,
@@ -180,16 +188,16 @@ export async function getProvider(db: DB, id: string): Promise<Provider | undefi
 async function writeProvider(db: DB, p: Provider): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO providers (id, name, endpoint, api, payout_address, accepted_token, description, secured, status, flagged, flag_reason, health, models, reputation, registered_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO providers (id, name, endpoint, api, payout_address, accepted_token, price_per_request, description, secured, status, flagged, flag_reason, health, models, reputation, registered_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name=excluded.name, endpoint=excluded.endpoint, api=excluded.api, payout_address=excluded.payout_address,
-         accepted_token=excluded.accepted_token, description=excluded.description, secured=excluded.secured,
+         accepted_token=excluded.accepted_token, price_per_request=excluded.price_per_request, description=excluded.description, secured=excluded.secured,
          status=excluded.status, flagged=excluded.flagged,
          flag_reason=excluded.flag_reason, health=excluded.health, models=excluded.models, reputation=excluded.reputation`,
     )
     .bind(
-      p.id, p.name, p.endpoint, p.api, p.payoutAddress, p.acceptedToken, p.description ?? null,
+      p.id, p.name, p.endpoint, p.api, p.payoutAddress, p.acceptedToken, p.pricePerRequest, p.description ?? null,
       p.secured ? 1 : 0, p.status, p.flagged ? 1 : 0, p.flagReason ?? null,
       p.health ? JSON.stringify(p.health) : null, JSON.stringify(p.models),
       p.reputation ? JSON.stringify(p.reputation) : null, p.registeredAt,
@@ -205,6 +213,7 @@ export async function registerProvider(db: DB, input: ProviderInput): Promise<Pr
   const models = normalizeModels(input.models);
   const api = (input.api || 'openai-chat').trim();
   const acceptedToken = normalizePayoutToken(input.acceptedToken);
+  const pricePerRequest = normalizePricePerRequest(input.pricePerRequest, acceptedToken);
 
   if (!name) throw new Error('name is required (set it in schema.json or the form)');
   assertSafeEndpoint(endpoint, input.allowLocal ?? false); // SSRF guard
@@ -225,6 +234,7 @@ export async function registerProvider(db: DB, input: ProviderInput): Promise<Pr
     api,
     payoutAddress,
     acceptedToken,
+    pricePerRequest,
     models,
     ...(input.description ? { description: input.description.trim() } : {}),
     secured: Boolean(input.apiKey),
@@ -262,8 +272,11 @@ export interface ProviderUpdate {
   endpoint?: string;
   payoutAddress?: string;
   api?: string;
-  /** Change the token to be paid in ('sBTC' or 'USDCx'). */
+  /** Change the token to be paid in ('sBTC' or 'USDCx'). Requires
+   *  pricePerRequest in the same patch, since the price's unit changes. */
   acceptedToken?: PayoutToken;
+  /** New price per request, in the smallest unit of the (new) acceptedToken. */
+  pricePerRequest?: string | number;
   models?: Array<string | ModelSpec>;
   description?: string;
   /** Rotate the shared secret (stored server-side, never returned). */
@@ -329,6 +342,14 @@ export async function prepareUpdate(db: DB, id: string, patch: ProviderUpdate): 
 
   if (patch.acceptedToken !== undefined) {
     next.acceptedToken = normalizePayoutToken(patch.acceptedToken);
+  }
+
+  // The price is in the token's smallest unit, so a token switch without a new
+  // price would silently reinterpret it (5 sats → 5 micro-USDCx).
+  if (patch.pricePerRequest !== undefined) {
+    next.pricePerRequest = normalizePricePerRequest(patch.pricePerRequest, next.acceptedToken);
+  } else if (next.acceptedToken !== current.acceptedToken) {
+    throw new Error('changing acceptedToken requires a new pricePerRequest in that token');
   }
 
   if (patch.models !== undefined) {

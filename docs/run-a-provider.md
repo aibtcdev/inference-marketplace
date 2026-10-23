@@ -93,11 +93,14 @@ curl -X POST https://<gateway>/v1/providers \
     "name": "My node",
     "endpoint": "https://my-host/v1",
     "payoutAddress": "ST...",
+    "acceptedToken": "sBTC",
+    "pricePerRequest": "5",
     "models": ["Qwen/Qwen2.5-7B-Instruct"]
   }'
 ```
 
 - `payoutAddress` **must equal the signer's address** and be a testnet `ST…`/`SN…` address.
+- `pricePerRequest` (**required**) is your flat price per request in the token you're paid in (`acceptedToken`), as a whole number of its smallest unit: **sats** for sBTC (`"5"` = 5 sats), **0.000001 USDCx** for USDCx (`"2000"` = 0.002 USDCx). Clients pay exactly this per call.
 - `models` are **Hugging Face repo ids** — validated as real, text-generation, and commercially licensed (made-up / non-commercial ids are rejected).
 - `Timestamp` must be within **300s** of now; each signature is **single-use** (replay-protected).
 - The gateway verifies your endpoint is reachable **and** actually serving inference before listing it.
@@ -109,7 +112,7 @@ at `{endpoint}/schema.json` and send a signed `{"endpoint":"…","payoutAddress"
 
 ## Manage your listing
 
-Change name, models, payout, or endpoint **in place** — no delete/re-add, and no
+Change name, models, payout, price, or endpoint **in place** — no delete/re-add, and no
 shared key to remember. Everything is authorized by the same wallet signature.
 
 - **Web:** `/dashboard` — connect wallet, edit, sign.
