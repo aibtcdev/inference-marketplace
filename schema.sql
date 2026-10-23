@@ -13,6 +13,11 @@ CREATE TABLE IF NOT EXISTS providers (
   -- in this token (the 402 advertises only it). Existing DBs: run the ALTER below.
   --   ALTER TABLE providers ADD COLUMN accepted_token TEXT NOT NULL DEFAULT 'sBTC';
   accepted_token TEXT NOT NULL DEFAULT 'sBTC',
+  -- Flat price per request in the smallest unit of accepted_token (sats for
+  -- sBTC, 0.000001 USDCx for USDCx), as a decimal string — the x402 amount.
+  -- NULL only on rows from before per-request pricing (not routed). Existing DBs:
+  --   ALTER TABLE providers ADD COLUMN price_per_request TEXT;
+  price_per_request TEXT,
   description   TEXT,
   secured       INTEGER NOT NULL DEFAULT 0,
   status        TEXT NOT NULL DEFAULT 'pending',
