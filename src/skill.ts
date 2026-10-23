@@ -152,9 +152,11 @@ inference_register_provider({
   name: "My node",
   endpoint: "https://my-host/v1",
   models: ["Qwen/Qwen2.5-7B-Instruct"],
+  pricePerRequest: "5",    // sats per request (acceptedToken defaults to sBTC)
   gateway: "${origin}"     // payoutAddress defaults to your unlocked wallet
 })
 \`\`\`
+Needs \`@aibtc/mcp-server\` 1.76.1 or later (\`npx @aibtc/mcp-server@latest\`) — older versions don't send \`pricePerRequest\`.
 
 **1. Build the exact message** — \`Provider\` is the endpoint URL you'll register, \`Timestamp\` is the current unix time in seconds:
 \`\`\`
@@ -196,7 +198,7 @@ Prefer a manifest? Host a \`schema.json\` (matching \`GET ${origin}/v1/schema\`)
 
 ### Manage your listing (same wallet signature)
 AIBTC MCP agents manage in one call: \`inference_update_provider({ providerId, … })\`
-to change any field, \`inference_reveal_key({ providerId, rotate })\` to reveal/rotate
+to change any field (including \`pricePerRequest\` / \`acceptedToken\`), \`inference_reveal_key({ providerId, rotate })\` to reveal/rotate
 the shared key, and \`inference_list_providers()\` / \`inference_check_provider({ providerId })\`
 to find your id and re-probe health.
 
