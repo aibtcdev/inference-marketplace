@@ -431,6 +431,9 @@ app.post('/v1/providers', async (c) => {
   try {
     provider = await directory.registerProvider(c.env.DB, reg);
   } catch (e) {
+    if (e instanceof directory.DuplicateProviderError) {
+      return c.json({ error: e.message, existingId: e.existingId, update: `PATCH /v1/providers/${e.existingId}` }, 409);
+    }
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
   }
 
