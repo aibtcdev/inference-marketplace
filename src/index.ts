@@ -220,7 +220,7 @@ app.get('/health', (c) => {
 // on in one step — pay-per-inference + provider onboarding — generated from the
 // live catalog so it never drifts.
 app.get('/skill.md', async (c) => {
-  const providers = await directory.listProviders(c.env.DB);
+  const providers = (await directory.listProviders(c.env.DB)).filter((p) => !directory.isStale(p));
   const md = renderSkillMd({
     origin: new URL(c.req.url).origin,
     network: c.env.NETWORK || 'testnet',
@@ -263,8 +263,10 @@ app.get('/v1/models', async (c) => {
 });
 
 // Provider directory (supply side) — external providers registered via the UI.
+// Providers down for over 24 h are left out unless ?include=stale.
 app.get('/v1/providers', async (c) => {
-  const data = await directory.listProviders(c.env.DB);
+  const all = await directory.listProviders(c.env.DB);
+  const data = c.req.query('include') === 'stale' ? all : all.filter((p) => !directory.isStale(p));
   return c.json({ object: 'list', data });
 });
 
@@ -716,6 +718,8 @@ app.post('/v1/feedback', async (c) => {
 // schedule (see wrangler.jsonc triggers), updating live/degraded/down status.
 async function scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
   ctx.waitUntil((async () => {
+    // Rows down for over 7 days (e.g. old rotated-tunnel URLs) are deleted first.
+    await directory.expireDeadProviders(env.DB);
     const providers = await directory.listProviders(env.DB);
     await Promise.all(
       providers.map(async (p) => {
