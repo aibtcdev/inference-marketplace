@@ -12,7 +12,8 @@ import { signAuthHeaders } from "./wallet";
 export const GATEWAY = process.env.NEXT_PUBLIC_GATEWAY_URL ?? "";
 
 export type Health = { status: string; latencyMs: number; x402: boolean; checkedAt: string; error?: string } | null;
-export type ModelSpec = { id: string; name?: string; contextLength?: number; capabilities?: string[]; pricePerMTokenUsd?: number };
+export type ModelSpec = { id: string; name?: string; contextLength?: number; capabilities?: string[] };
+export type PayToken = "sBTC" | "USDCx";
 export type Provider = {
   id: string;
   name: string;
@@ -20,7 +21,10 @@ export type Provider = {
   api: string;
   payoutAddress: string;
   /** Token this provider is paid in ('sBTC' or 'USDCx'). */
-  acceptedToken?: "sBTC" | "USDCx";
+  acceptedToken?: PayToken;
+  /** Flat price per request in the smallest unit of acceptedToken (sats for
+   *  sBTC, 0.000001 USDCx for USDCx) — exactly what the 402 charges. */
+  pricePerRequest?: string | null;
   models: ModelSpec[];
   description?: string;
   status: "live" | "degraded" | "down" | "pending";
@@ -36,6 +40,35 @@ export const STATUS: Record<string, { c: string; label: string }> = {
   down: { c: "#ff4d4f", label: "down" },
   pending: { c: "#6b7280", label: "checking" },
 };
+
+const USDCX_UNIT = 1_000_000; // 6 decimals
+
+/** A per-request price for display, in the provider's own token: "5 sats" / "0.002 USDCx". */
+export function formatPrice(amount: string | null | undefined, token: PayToken = "sBTC"): string {
+  if (!amount) return "No price set";
+  const n = Number(amount);
+  if (token === "sBTC") return `${n.toLocaleString()} sat${n === 1 ? "" : "s"}`;
+  return `${(n / USDCX_UNIT).toFixed(6).replace(/\.?0+$/, "")} USDCx`;
+}
+
+/** What a provider types (sats, or USDCx like "0.002") → base units for the
+ *  API, or null if it isn't a positive amount the token can represent. */
+export function priceToBaseUnits(input: string, token: PayToken): string | null {
+  const v = input.trim();
+  if (token === "sBTC") return /^[1-9][0-9]*$/.test(v) ? v : null;
+  const m = /^(\d+)(?:\.(\d{1,6}))?$/.exec(v);
+  if (!m) return null;
+  const base = BigInt(m[1]) * BigInt(USDCX_UNIT) + BigInt((m[2] ?? "").padEnd(6, "0"));
+  return base > BigInt(0) ? base.toString() : null;
+}
+
+/** Base units → the value a provider would type (inverse of priceToBaseUnits). */
+export function priceFromBaseUnits(amount: string | null | undefined, token: PayToken): string {
+  if (!amount) return "";
+  return token === "sBTC" ? amount : (Number(amount) / USDCX_UNIT).toFixed(6).replace(/\.?0+$/, "");
+}
+
+export const PRICE_UNIT: Record<PayToken, string> = { sBTC: "sats", USDCx: "USDCx" };
 
 export const trunc = (a: string) => (a && a.length > 16 ? `${a.slice(0, 9)}…${a.slice(-5)}` : a);
 
@@ -61,7 +94,7 @@ function EndpointCard({ p, onChanged }: { p: Provider; onChanged: () => void }) 
   const [key, setKey] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [showProtect, setShowProtect] = useState(false);
-  const [form, setForm] = useState({ name: p.name, models: p.models.map((m) => m.id).join(", "), payoutAddress: p.payoutAddress, acceptedToken: p.acceptedToken ?? "sBTC", apiKey: "" });
+  const [form, setForm] = useState({ name: p.name, models: p.models.map((m) => m.id).join(", "), payoutAddress: p.payoutAddress, acceptedToken: p.acceptedToken ?? "sBTC", price: priceFromBaseUnits(p.pricePerRequest, p.acceptedToken ?? "sBTC"), apiKey: "" });
   const secured = !!p.secured;
 
   // Sign with the payout wallet, then call the gateway.
@@ -90,10 +123,13 @@ function EndpointCard({ p, onChanged }: { p: Provider; onChanged: () => void }) 
     try {
       const models = form.models.split(",").map((s) => s.trim()).filter(Boolean).map((id) => ({ id }));
       const apiKey = form.apiKey.trim();
+      const pricePerRequest = priceToBaseUnits(form.price, form.acceptedToken);
+      if (!pricePerRequest) throw new Error(`Enter a price per request in ${PRICE_UNIT[form.acceptedToken]}`);
       await callSigned("update", `/v1/providers/${p.id}`, "PATCH", {
         name: form.name.trim(),
         payoutAddress: form.payoutAddress.trim(),
         acceptedToken: form.acceptedToken,
+        pricePerRequest,
         models,
         ...(apiKey ? { apiKey } : {}),
       });
@@ -119,6 +155,9 @@ function EndpointCard({ p, onChanged }: { p: Provider; onChanged: () => void }) 
             </span>
           </div>
           <div className="mono mt-0.5 break-all text-xs text-[#9aa3af]">{p.endpoint}</div>
+          <div className={`mt-1 text-xs ${p.pricePerRequest ? "text-[#cfd5dd]" : "text-[#ffbf2e]"}`}>
+            {p.pricePerRequest ? `${formatPrice(p.pricePerRequest, p.acceptedToken)} / request` : "No price set — click Edit to set one (unpriced endpoints aren't routed)"}
+          </div>
         </div>
         <div className="flex shrink-0 gap-1.5">
           {secured && <button className={btn} disabled={!!busy} onClick={() => revealKey(false)}>{busy === "reveal" ? "…" : "Reveal key"}</button>}
@@ -158,14 +197,35 @@ function EndpointCard({ p, onChanged }: { p: Provider; onChanged: () => void }) 
           <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Display name" className={inp} />
           <input value={form.models} onChange={(e) => setForm({ ...form, models: e.target.value })} placeholder="Model ids (comma-separated)" className={`mono ${inp} text-xs`} />
           <input value={form.payoutAddress} onChange={(e) => setForm({ ...form, payoutAddress: e.target.value })} placeholder="Payout address" className={`mono ${inp} text-xs`} />
-          <select value={form.acceptedToken} onChange={(e) => setForm({ ...form, acceptedToken: e.target.value as "sBTC" | "USDCx" })} className={inp} title="Token you're paid in">
-            <option value="sBTC">Paid in sBTC</option>
-            <option value="USDCx">Paid in USDCx</option>
-          </select>
+          <div className="flex gap-2">
+            <select value={form.acceptedToken} onChange={(e) => setForm({ ...form, acceptedToken: e.target.value as PayToken })} className={inp} title="Token you're paid in">
+              <option value="sBTC">Paid in sBTC</option>
+              <option value="USDCx">Paid in USDCx</option>
+            </select>
+            <PriceInput value={form.price} token={form.acceptedToken} onChange={(price) => setForm({ ...form, price })} className={inp} />
+          </div>
           <input value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder={secured ? "Replace API key (optional)" : "API key to require (optional — locks this endpoint)"} className={`mono ${inp} text-xs`} />
           <button disabled={!!busy} className="rounded-lg bg-[#f7931a] px-3 py-1.5 text-xs font-medium text-[#1a1206] disabled:opacity-60">{busy === "edit" ? "Signing…" : "Sign & save"}</button>
         </form>
       )}
+    </div>
+  );
+}
+
+/** Price-per-request field, labelled in the selected token's unit. */
+export function PriceInput({ value, token, onChange, className }: { value: string; token: PayToken; onChange: (v: string) => void; className: string }) {
+  const invalid = value.trim() !== "" && !priceToBaseUnits(value, token);
+  return (
+    <div className="relative w-full">
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        inputMode={token === "sBTC" ? "numeric" : "decimal"}
+        placeholder={token === "sBTC" ? "5" : "0.002"}
+        title={token === "sBTC" ? "Whole sats per request" : "USDCx per request (up to 6 decimals)"}
+        className={`${className} pr-28 ${invalid ? "border-[#ff4d4f]" : ""}`}
+      />
+      <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-[#9aa3af]">{PRICE_UNIT[token]} / request</span>
     </div>
   );
 }
