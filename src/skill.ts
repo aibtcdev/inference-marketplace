@@ -14,7 +14,14 @@ export interface SkillContext {
   origin: string;
   network: string;
   providers: Provider[];
-  defaultPricePerMTok: number;
+}
+
+/** A per-request price in the provider's own token, for humans (5 sats / 0.002 USDCx). */
+function formatPrice(p: Provider): string {
+  if (!p.pricePerRequest) return '—';
+  if (p.acceptedToken === 'sBTC') return `${p.pricePerRequest} sat${p.pricePerRequest === '1' ? '' : 's'}`;
+  const v = (Number(p.pricePerRequest) / 1e6).toFixed(6).replace(/\.?0+$/, '');
+  return `${v} USDCx`;
 }
 
 /** First callable model id across live providers, for the example snippets. */
@@ -30,22 +37,22 @@ function exampleModelId(providers: Provider[]): string {
 function modelsTable(providers: Provider[]): string {
   const rows: string[] = [];
   for (const p of providers) {
-    if (p.status === 'down') continue;
+    if (p.status === 'down' || p.flagged || !p.pricePerRequest) continue;
     for (const m of p.models) {
       const ctx = m.contextLength ? m.contextLength.toLocaleString() : '—';
-      rows.push(`| \`${m.id}\` | ${p.id} | ${p.acceptedToken} | ${ctx} | ${p.status} |`);
+      rows.push(`| \`${m.id}\` | ${p.id} | ${formatPrice(p)} | ${ctx} | ${p.status} |`);
     }
   }
   if (!rows.length) rows.push('| _(no live providers yet — register one below)_ |  |  |  |  |');
   return [
-    '| Model | Provider | Paid in | Context | Status |',
-    '|-------|----------|---------|---------|--------|',
+    '| Model | Provider | Price / request | Context | Status |',
+    '|-------|----------|-----------------|---------|--------|',
     ...rows,
   ].join('\n');
 }
 
 export function renderSkillMd(ctx: SkillContext): string {
-  const { origin, network, providers, defaultPricePerMTok } = ctx;
+  const { origin, network, providers } = ctx;
   const example = exampleModelId(providers);
   // Payout address prefix follows the network: ST/SN on testnet, SP/SM on mainnet.
   const walletEx = network === 'mainnet' ? 'SP...' : 'ST...';
@@ -57,11 +64,11 @@ Pay-per-request AI inference, settled in Bitcoin (**sBTC**) on Stacks via
 **x402**. Non-custodial: clients pay providers directly. This document is
 machine- and human-readable — read it once and you can either **(A) call
 inference and pay per request** or **(B) list your own model and get paid**.
-Every model id below is real and callable right now; every price is live.
+Every model id below is real and callable right now, at the listed price.
 
 - **Base URL:** \`${origin}\`
 - **Network:** \`${network}\`
-- **Payment:** x402 v2 — tokens: \`sBTC\`, \`USDCx\`, \`STX\` (choose with header \`X-PAYMENT-TOKEN-TYPE\`)
+- **Payment:** x402 v2 — one flat price per request, set by the provider, in the token they're paid in (\`sBTC\` or \`USDCx\`)
 - **Live catalog (JSON):** \`GET ${origin}/v1/models\`
 - **Registration schema (JSON):** \`GET ${origin}/v1/schema\`
 
@@ -96,7 +103,8 @@ curl -X POST ${origin}/v1/chat/completions \\
    settles and returns the completion. Each response carries a \`_marketplace\`
    receipt including the settlement \`txId\`.
 
-To pay in a specific token, send \`X-PAYMENT-TOKEN-TYPE: sBTC\` (or \`USDCx\` / \`STX\`).
+The 402 asks for the serving provider's flat per-request price, in the token
+that provider is paid in — the same amount shown in the table below.
 
 ### Models
 ${modelsTable(providers)}
@@ -172,11 +180,13 @@ curl -X POST ${origin}/v1/providers \\
     "endpoint": "https://my-host/v1",
     "payoutAddress": "${walletEx}",
     "acceptedToken": "sBTC",
+    "pricePerRequest": "5",
     "models": ["Qwen/Qwen2.5-7B-Instruct"]
   }'
 \`\`\`
 - \`payoutAddress\` **must equal the signer's address** and be a ${network} address (${walletPrefixes}).
 - \`acceptedToken\` is the token you're paid in — \`"sBTC"\` or \`"USDCx"\` (optional, defaults to \`sBTC\`). Clients pay you directly in it.
+- \`pricePerRequest\` (**required**) is what each request costs, as a whole number of the token's smallest unit: **sats** for sBTC (\`"5"\` = 5 sats), **0.000001 USDCx** for USDCx (\`"2000"\` = 0.002 USDCx).
 - \`models\` are **Hugging Face repo ids** — validated as real, text-generation, and commercially licensed (made-up / non-commercial ids rejected).
 - \`Timestamp\` must be within **300s** of now; each signature is **single-use** (replay-protected).
 - On success your node is verified, listed, and immediately callable.
@@ -217,9 +227,11 @@ Access. The shared key is **only** this gateway↔endpoint credential — never 
 ownership token (that is your wallet signature).
 
 ### Pricing
-Declare \`pricePerMTokenUsd\` per model (USD per 1M tokens) in your registration;
-the default is **$${defaultPricePerMTok}/Mtok**. The charged amount is converted to
-the client's chosen token at the live spot rate, so your USD price stays stable.
+You set one flat **price per request**, in the token you're paid in — x402 charges
+a fixed amount per call, quoted in the 402 before your model runs. There is no
+default and no currency conversion: \`"pricePerRequest": "5"\` with sBTC means every
+call pays you exactly 5 sats. Change it any time with a signed PATCH; switching
+\`acceptedToken\` requires a new \`pricePerRequest\` in the same request.
 
 ---
 
@@ -246,10 +258,10 @@ How bad providers are handled, so you can trust the catalog:
 | GET | \`/v1/models\` | free | Live model catalog (every model from a registered provider) |
 | GET | \`/v1/providers\` | free | Registered providers + health + \`flagged\` status |
 | GET | \`/v1/schema\` | free | Provider registration JSON Schema |
-| POST | \`/v1/chat/completions\` | **paid** | OpenAI-compatible; price by model + tokens |
+| POST | \`/v1/chat/completions\` | **paid** | OpenAI-compatible; provider's flat per-request price |
 | POST | \`/v1/route/{id}/chat/completions\` | **paid** | Call a specific provider; settles to them |
 | POST | \`/v1/providers\` | free | Register a provider (**wallet-signature** required; verified before listing) |
-| PATCH | \`/v1/providers/{id}\` | free | Self-service update (name/models/payout/endpoint); **wallet-signature** authorized |
+| PATCH | \`/v1/providers/{id}\` | free | Self-service update (name/models/payout/endpoint/price); **wallet-signature** authorized |
 | POST | \`/v1/providers/{id}/key\` | free | Reveal or rotate your shared key; **wallet-signature** authorized |
 | POST | \`/v1/providers/{id}/flag\` | free | **Operator only** (admin token): flag/unflag a provider (de-route) |
 `;
