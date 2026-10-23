@@ -205,6 +205,18 @@ async function writeProvider(db: DB, p: Provider): Promise<void> {
     .run();
 }
 
+/**
+ * Thrown when a payout wallet registers a name it already has listed. The usual
+ * cause is a tunnel (e.g. localhost.run) that rotated its hostname: the right move
+ * is `PATCH /v1/providers/{existingId}` with the new endpoint, not a second row.
+ */
+export class DuplicateProviderError extends Error {
+  constructor(public readonly existingId: string, message: string) {
+    super(message);
+    this.name = 'DuplicateProviderError';
+  }
+}
+
 /** Validate + persist a new provider (status `pending` until first health check). */
 export async function registerProvider(db: DB, input: ProviderInput): Promise<Provider> {
   const name = (input.name || '').trim();
@@ -226,6 +238,18 @@ export async function registerProvider(db: DB, input: ProviderInput): Promise<Pr
 
   const dupe = await db.prepare('SELECT id FROM providers WHERE endpoint = ?').bind(endpoint).first();
   if (dupe) throw new Error('this endpoint is already registered');
+
+  // Same wallet + same name = the same provider under a new URL. Point at PATCH instead of adding a row.
+  const same = await db
+    .prepare('SELECT id FROM providers WHERE payout_address = ? AND lower(name) = lower(?)')
+    .bind(payoutAddress, name)
+    .first<{ id: string }>();
+  if (same) {
+    throw new DuplicateProviderError(
+      same.id,
+      `${payoutAddress} already lists "${name}" as ${same.id}; update its endpoint with PATCH /v1/providers/${same.id} instead of registering a new row`,
+    );
+  }
 
   const provider: Provider = {
     id: slugId(name),
