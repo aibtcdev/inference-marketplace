@@ -17,7 +17,6 @@ import { checkEndpoint, verifyProvider } from './health';
 import { REGISTRATION_SCHEMA } from './schema';
 import { validateHfModel } from './hf';
 import { recoverWalletAuth, toNetwork, AUTH_SKEW_SECONDS, type AuthAction } from './wallet-auth';
-import { estimateTokens, usdToBaseUnits, getBtcUsd } from './pricing';
 import { renderSkillMd } from './skill';
 
 type Env = {
@@ -66,9 +65,6 @@ type Variables = {
   /** Per-model legion (fees/treasury/gov) resolved for fee routing. */
   legion?: import('./model-legions').ModelLegion;
 };
-
-/** Default per-token rate for a registered provider that declares none. */
-const DEFAULT_PRICE_PER_MTOK_USD = 0.20;
 
 /** A fresh shared secret (48 hex chars) — the gateway's upstream-routing credential. */
 function genSharedKey(): string {
@@ -119,13 +115,6 @@ async function tryWalletAuth(
   if (await c.env.PROVIDERS.get(nonceKey)) return { ok: false, status: 401, error: 'signature already used (replay)' };
   await c.env.PROVIDERS.put(nonceKey, '1', { expirationTtl: AUTH_SKEW_SECONDS * 2 });
   return { ok: true };
-}
-
-/** Concatenated text of the chat messages, for upfront prompt-token sizing. */
-function promptTextOf(body: ChatCompletionBody): string {
-  return (body.messages ?? [])
-    .map((m) => (typeof m.content === 'string' ? m.content : ''))
-    .join(' ');
 }
 
 /**
@@ -207,7 +196,7 @@ app.get('/', (c) => {
       skill: 'GET /skill.md  (agent skill manifest — read this first)',
       models: 'GET /v1/models',
       providers: 'GET /v1/providers',
-      chatCompletions: 'POST /v1/chat/completions  (OpenAI-compatible, dynamic price by model)',
+      chatCompletions: 'POST /v1/chat/completions  (OpenAI-compatible; flat per-request price set by the provider)',
       routeToProvider: 'POST /v1/route/{id}/chat/completions  (call a specific provider; settles to them)',
       registerProvider: 'POST /v1/providers',
       updateProvider: 'PATCH /v1/providers/{id}  (self-service; Authorization: Bearer <shared key>)',
@@ -236,30 +225,25 @@ app.get('/skill.md', async (c) => {
     origin: new URL(c.req.url).origin,
     network: c.env.NETWORK || 'testnet',
     providers,
-    defaultPricePerMTok: DEFAULT_PRICE_PER_MTOK_USD,
   });
   c.header('Content-Type', 'text/markdown; charset=utf-8');
   c.header('Cache-Control', 'public, max-age=60');
   return c.body(md);
 });
 
-// Model catalog with LIVE, dynamic pricing. Each model is priced for a
-// reference 1k-output-token call so callers can compare; the real charge is
-// quoted per request from the actual prompt + max_tokens.
+// Model catalog. Each entry carries the provider's flat per-request price, in
+// the provider's own token — exactly the amount the 402 will ask for.
 app.get('/v1/models', async (c) => {
-  // Every model is served by a live registered provider, priced at that
-  // provider's per-token rate. Callable via /v1/chat/completions (model id) or
-  // the explicit /v1/route/:id proxy; payment settles to the provider directly,
-  // in the provider's chosen token. Exclude flagged + down providers, then rank
-  // by stake so higher-staked providers list first (staking buys ranking; it is
-  // never required to earn).
-  const liveProviders = (await directory.listProviders(c.env.DB)).filter((p) => p.status !== 'down' && !p.flagged);
+  // Every model is served by a live registered provider. Callable via
+  // /v1/chat/completions (model id) or the explicit /v1/route/:id proxy; payment
+  // settles to the provider directly, in the provider's chosen token. Exclude
+  // flagged, down and unpriced providers, then rank by stake so higher-staked
+  // providers list first (staking buys ranking; it is never required to earn).
+  const liveProviders = (await directory.listProviders(c.env.DB)).filter((p) => p.status !== 'down' && !p.flagged && p.pricePerRequest);
   const providers = await rankByStake(c.env, liveProviders);
-  const btcUsd = await getBtcUsd();
   const community = [];
   for (const p of providers) {
     for (const m of p.models) {
-      const usd = (1000 / 1_000_000) * (m.pricePerMTokenUsd ?? DEFAULT_PRICE_PER_MTOK_USD);
       community.push({
         id: m.id,
         name: m.name ?? m.id,
@@ -270,12 +254,12 @@ app.get('/v1/models', async (c) => {
         status: p.status,
         acceptedToken: p.acceptedToken,
         route: `/v1/route/${p.id}/chat/completions`,
-        referencePrice: { usd: Number(usd.toFixed(6)), sats: await usdToBaseUnits(usd, 'sBTC'), btcUsd },
+        pricePerRequest: { amount: p.pricePerRequest, token: p.acceptedToken },
       });
     }
   }
 
-  return c.json({ object: 'list', pricedFor: '1000 output tokens', data: community });
+  return c.json({ object: 'list', data: community });
 });
 
 // Provider directory (supply side) — external providers registered via the UI.
@@ -289,9 +273,9 @@ app.get('/v1/providers', async (c) => {
 // ---------------------------------------------------------------------------
 
 /**
- * OpenAI-compatible chat completions. Price is resolved dynamically from the
- * requested `model` and the serving provider's chosen token, then settled
- * (directly to that provider) before we forward the request.
+ * OpenAI-compatible chat completions. The serving provider is resolved from the
+ * requested `model`; the client pays that provider's flat per-request price, in
+ * the provider's chosen token, directly to them before we forward the request.
  */
 app.post('/v1/chat/completions',
   x402DynamicMiddleware(async (c, _tokenType: TokenType) => {
@@ -303,12 +287,12 @@ app.post('/v1/chat/completions',
     }
 
     // Every model is served by a registered provider. The client pays the
-    // provider directly (non-custodial) at the provider's declared rate, in the
-    // token the provider chose. Exclude flagged providers, then pick the
-    // highest-staked one for the model (staking buys ranking; never required).
+    // provider directly (non-custodial) at the provider's per-request price, in
+    // the token the provider chose. Exclude flagged and unpriced providers, then
+    // pick the highest-staked one for the model (staking buys ranking; never required).
     const providers = await directory.listProviders(c.env.DB);
     const candidates = providers.filter(
-      (p) => p.status === 'live' && !p.flagged && p.models.some((m) => m.id === body.model),
+      (p) => p.status === 'live' && !p.flagged && p.pricePerRequest && p.models.some((m) => m.id === body.model),
     );
     const provider = (await rankByStake(c.env, candidates))[0];
     const model = provider?.models.find((m) => m.id === body.model);
@@ -318,21 +302,16 @@ app.post('/v1/chat/completions',
         hint: 'GET /v1/models for the catalog',
       }, 400);
     }
-    // The provider chose the token it's paid in — advertise only that one, so the
-    // client pays the provider directly in sBTC or USDCx as declared.
-    const payToken = provider.acceptedToken;
-    const pricePerMTok = model.pricePerMTokenUsd ?? DEFAULT_PRICE_PER_MTOK_USD;
-    const estTokens = estimateTokens(promptTextOf(body)) + (body.max_tokens ?? 512);
-    const usd = (estTokens / 1_000_000) * pricePerMTok;
-    const amount = await usdToBaseUnits(usd, payToken);
     c.set('route', { kind: 'community', providerId: provider.id, modelId: model.id });
     // route this model's 8% skim to its model legion
     c.set('legion', legionForModel(c.env, model.id) ?? undefined);
+    // The provider set a flat price in the token it's paid in — advertise only
+    // that, so the client pays the provider directly exactly what they asked.
     return {
-      amount,
-      tokenType: payToken,
+      amount: provider.pricePerRequest!,
+      tokenType: provider.acceptedToken,
       payTo: provider.payoutAddress,
-      extra: { pricing: { type: 'dynamic', estimate: { model: model.id, provider: provider.id, estimatedCostUsd: usd.toFixed(6) } } },
+      extra: { pricing: { type: 'per-request', model: model.id, provider: provider.id } },
     };
   }),
   async (c) => {
@@ -422,7 +401,12 @@ app.post('/v1/providers', async (c) => {
       const mr = await fetch(manifestUrl, { signal: AbortSignal.timeout(8000) });
       if (mr.ok) {
         const manifest = (await mr.json()) as Record<string, unknown>;
-        reg = { ...manifest, endpoint: (manifest.endpoint as string) || (body.endpoint as string) } as unknown as directory.ProviderInput;
+        // A price sent alongside the manifest (e.g. from the register form) wins,
+        // together with its token, since the price is denominated in that token.
+        const bodyPrice = body.pricePerRequest !== undefined
+          ? { pricePerRequest: body.pricePerRequest, acceptedToken: body.acceptedToken }
+          : {};
+        reg = { ...manifest, endpoint: (manifest.endpoint as string) || (body.endpoint as string), ...bodyPrice } as unknown as directory.ProviderInput;
       } else if (explicit) {
         return c.json({ error: `Couldn't fetch schema.json (HTTP ${mr.status})` }, 400);
       }
@@ -699,21 +683,15 @@ app.post('/v1/route/:id/chat/completions',
 
     const model = provider.models.find((m) => m.id === body.model) || provider.models[0];
     if (!model) return c.json({ error: 'Provider serves no models' }, 400);
+    if (!provider.pricePerRequest) return c.json({ error: 'Provider has not set a price yet' }, 503);
 
-    // Price = provider's declared per-token rate × estimated tokens. The client
-    // pays the provider directly, in the token the provider chose (sBTC/USDCx);
-    // the marketplace takes no custody.
-    const payToken = provider.acceptedToken;
-    const pricePerMTok = model.pricePerMTokenUsd ?? DEFAULT_PRICE_PER_MTOK_USD;
-    const estTokens = estimateTokens(promptTextOf(body)) + (body.max_tokens ?? 512);
-    const usd = (estTokens / 1_000_000) * pricePerMTok;
-    const amount = await usdToBaseUnits(usd, payToken);
-
+    // The provider's flat per-request price, paid directly to them in the token
+    // they chose (sBTC/USDCx); the marketplace takes no custody.
     return {
-      amount,
-      tokenType: payToken,
+      amount: provider.pricePerRequest,
+      tokenType: provider.acceptedToken,
       payTo: provider.payoutAddress,
-      extra: { pricing: { type: 'dynamic', estimate: { model: model.id, provider: provider.id, estimatedCostUsd: usd.toFixed(6) } } },
+      extra: { pricing: { type: 'per-request', model: model.id, provider: provider.id } },
     };
   }),
   async (c) => {
