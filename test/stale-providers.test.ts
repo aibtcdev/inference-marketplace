@@ -76,3 +76,17 @@ test('down_since 8 days ago is deleted by the cron with its provider_keys row; 6
   assert.deepEqual((await directory.listProviders(d1)).map((p) => p.id), [grace.id]);
   assert.equal(db.prepare('SELECT count(*) AS n FROM provider_keys WHERE id = ?').get(dead.id)!.n, 0);
 });
+
+test('a provider fixed by PATCH (status live, old down_since kept) is neither hidden nor expired', async () => {
+  const { d1 } = fakeD1();
+  const p = await register(d1);
+  await directory.setHealth(d1, p.id, health('down', ago(8 * 24 * HOUR)));
+  const down = (await directory.getProvider(d1, p.id))!;
+  // what the PATCH handler does after re-verifying: status/health from the new check, then commitUpdate
+  await directory.commitUpdate(d1, { ...down, health: health('live', ago(0)), status: 'live' });
+  const fixed = (await directory.getProvider(d1, p.id))!;
+  assert.equal(fixed.status, 'live');
+  assert.equal(fixed.downSince, ago(8 * 24 * HOUR)); // writeProvider leaves down_since alone
+  assert.equal(directory.isStale(fixed, NOW), false);
+  assert.deepEqual(await directory.expireDeadProviders(d1, NOW), []);
+});

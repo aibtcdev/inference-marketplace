@@ -719,7 +719,12 @@ app.post('/v1/feedback', async (c) => {
 async function scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
   ctx.waitUntil((async () => {
     // Rows down for over 7 days (e.g. old rotated-tunnel URLs) are deleted first.
-    await directory.expireDeadProviders(env.DB);
+    // A cleanup failure (e.g. the down_since ALTER not yet applied) must not stop the probes.
+    try {
+      await directory.expireDeadProviders(env.DB);
+    } catch (e) {
+      console.error('expireDeadProviders failed', e);
+    }
     const providers = await directory.listProviders(env.DB);
     await Promise.all(
       providers.map(async (p) => {

@@ -434,16 +434,18 @@ export const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 /** Down this long → deleted by the cron. Leaves an owner time to PATCH a moved endpoint. */
 export const EXPIRE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Down for more than STALE_AFTER_MS. Nothing is deleted; one good check brings it back. */
+/** Down for more than STALE_AFTER_MS. Nothing is deleted; one good check brings it back.
+ *  Gated on status too: a PATCH re-verifies and writes status without touching down_since. */
 export function isStale(p: Provider, now: Date = new Date()): boolean {
-  return !!p.downSince && Date.parse(p.downSince) < now.getTime() - STALE_AFTER_MS;
+  return p.status === 'down' && !!p.downSince && Date.parse(p.downSince) < now.getTime() - STALE_AFTER_MS;
 }
 
-/** Delete providers (and their keys) down for more than EXPIRE_AFTER_MS. Returns the removed ids. */
+/** Delete providers (and their keys) down for more than EXPIRE_AFTER_MS. Returns the removed ids.
+ *  Only rows still `down`: a row fixed by PATCH is live with a stale down_since until the next probe. */
 export async function expireDeadProviders(db: DB, now: Date = new Date()): Promise<string[]> {
   const cutoff = new Date(now.getTime() - EXPIRE_AFTER_MS).toISOString();
   const { results } = await db
-    .prepare('SELECT id FROM providers WHERE down_since IS NOT NULL AND down_since < ?')
+    .prepare("SELECT id FROM providers WHERE status = 'down' AND down_since IS NOT NULL AND down_since < ?")
     .bind(cutoff)
     .all<{ id: string }>();
   const ids = (results ?? []).map((r) => r.id);
