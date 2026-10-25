@@ -206,7 +206,8 @@ app.get('/', (c) => {
     trust: {
       enforcedBy: 'operator',
       model: 'A provider can be flagged (de-routed everywhere, removed from catalog) by the marketplace operator via an admin-token-gated endpoint. This is a manual action; there is no automatic cheat-detection yet. Agents/users can report a provider, but only the operator can flag.',
-      flaggedStatusPublic: "GET /v1/providers exposes each provider's `flagged` and `flagReason`",
+      flaggedStatusPublic: "GET /v1/providers exposes each provider's `flagged` and `flagReason`; both keys are omitted (not present as false/null) when the provider isn't flagged",
+      jobsOk: 'not implemented — there is no per-job success/failure counter on the provider record; `reputation` is the only job-outcome-adjacent field and stays null until Phase 3 feedback wiring lands',
       roadmap: 'flag decision moving on-chain to a stake-weighted legion-gov vote',
     },
   });

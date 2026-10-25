@@ -246,7 +246,12 @@ How bad providers are handled, so you can trust the catalog:
   action** via an admin-gated endpoint — there is **no automatic cheat-detection yet**, so a
   provider is flagged only when the operator acts on a complaint or review.
 - **Transparency:** a provider's \`flagged\` status (and \`flagReason\`) is **public** in
-  \`GET /v1/providers\`. A flagged provider never serves traffic.
+  \`GET /v1/providers\`. A flagged provider never serves traffic. **Note:** \`flagged\` and
+  \`flagReason\` are omitted from the response entirely when false/unset — a missing
+  \`flagged\` key means "not flagged," not "field unsupported." There is currently no
+  \`jobsOk\`/\`jobsFail\` (or similar per-job success counter) on this record; \`reputation\`
+  is the only job-outcome-adjacent field, and it stays \`null\` until Phase 3 feedback wiring
+  lands.
 - **You can report, not flag:** reporting a suspect provider signals the operator; only the
   operator turns a report into a flag. Flagging is **not** a crowd action.
 - **Roadmap:** the flag decision is planned to move on-chain to a stake-weighted
