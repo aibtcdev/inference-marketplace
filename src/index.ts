@@ -12,6 +12,7 @@ import { proxyChatCompletion } from './upstream';
 import type { ChatCompletionBody } from './upstream';
 import * as directory from './directory';
 import { rankByStake } from './legion';
+import { buildModelCatalog, isRoutable } from './catalog';
 import { legionForModel } from './model-legions';
 import { checkEndpoint, verifyProvider } from './health';
 import { REGISTRATION_SCHEMA } from './schema';
@@ -236,30 +237,13 @@ app.get('/skill.md', async (c) => {
 app.get('/v1/models', async (c) => {
   // Every model is served by a live registered provider. Callable via
   // /v1/chat/completions (model id) or the explicit /v1/route/:id proxy; payment
-  // settles to the provider directly, in the provider's chosen token. Exclude
-  // flagged, down and unpriced providers, then rank by stake so higher-staked
+  // settles to the provider directly, in the provider's chosen token. Lists only
+  // providers the router would use (isRoutable), ranked by stake so higher-staked
   // providers list first (staking buys ranking; it is never required to earn).
-  const liveProviders = (await directory.listProviders(c.env.DB)).filter((p) => p.status !== 'down' && !p.flagged && p.pricePerRequest);
+  // One entry per model id; its providers are nested in that order.
+  const liveProviders = (await directory.listProviders(c.env.DB)).filter(isRoutable);
   const providers = await rankByStake(c.env, liveProviders);
-  const community = [];
-  for (const p of providers) {
-    for (const m of p.models) {
-      community.push({
-        id: m.id,
-        name: m.name ?? m.id,
-        contextLength: m.contextLength ?? null,
-        capabilities: m.capabilities ?? [],
-        providerId: p.id,
-        source: 'community',
-        status: p.status,
-        acceptedToken: p.acceptedToken,
-        route: `/v1/route/${p.id}/chat/completions`,
-        pricePerRequest: { amount: p.pricePerRequest, token: p.acceptedToken },
-      });
-    }
-  }
-
-  return c.json({ object: 'list', data: community });
+  return c.json({ object: 'list', data: buildModelCatalog(providers) });
 });
 
 // Provider directory (supply side) — external providers registered via the UI.
@@ -292,7 +276,7 @@ app.post('/v1/chat/completions',
     // pick the highest-staked one for the model (staking buys ranking; never required).
     const providers = await directory.listProviders(c.env.DB);
     const candidates = providers.filter(
-      (p) => p.status === 'live' && !p.flagged && p.pricePerRequest && p.models.some((m) => m.id === body.model),
+      (p) => isRoutable(p) && p.models.some((m) => m.id === body.model),
     );
     const provider = (await rankByStake(c.env, candidates))[0];
     const model = provider?.models.find((m) => m.id === body.model);
