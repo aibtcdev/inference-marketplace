@@ -21,7 +21,10 @@
     "NETWORK": "mainnet",
     "RELAY_URL": "https://x402-relay.aibtc.com",
     "PRICE_MARKUP": "1.5",
-    "STACKS_API": "https://api.hiro.so"
+    "STACKS_API": "https://api.hiro.so",
+    // x402-sponsor-relay's sponsor address, same value as landing-page's inbox.
+    // Sent as extra.feePayer so clients actually sign a sponsored tx (#33).
+    "X402_SPONSOR_FEE_PAYER": "SP3F6ZPHAR5D0YT0CTPJST7H3NBZ43A5FW226FMYP"
   },
   // Gas sponsorship: x402-sponsor-relay's RelayRPC (same CF account). Sponsored
   // payments settle through sponsorPayment — the public /settle never sponsors.
