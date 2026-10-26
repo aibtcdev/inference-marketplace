@@ -87,6 +87,27 @@ function isSponsoredTx(txHex: string | undefined): boolean {
 // Bindings are `any` so these helpers compose with any app Env.
 type Ctx = Context<{ Bindings: any; Variables: { x402?: X402Context; quote?: unknown; route?: unknown; legion?: { fees?: string; treasury?: string; gov?: string } } }>;
 
+/**
+ * `extra` for the 402's payment requirements. When the relay binding is wired we
+ * advertise sponsorship. x402-stacks clients only build a sponsored, fee-0 tx when
+ * `extra.feePayer` is a string (interceptor-v2: `typeof extra?.feePayer === 'string'`),
+ * so `sponsored: true` alone gets a self-paid tx and the relay path never runs (#33).
+ * `feePayer` is the relay's sponsor address (`X402_SPONSOR_FEE_PAYER`), the same key
+ * the aibtc inbox advertises. `sponsored: true` stays for readers that use it.
+ */
+export function buildPaymentExtra(
+  base: Record<string, unknown> | undefined,
+  hasRelay: boolean,
+  feePayer: string | undefined,
+): Record<string, unknown> {
+  const extra: Record<string, unknown> = { ...(base ?? {}) };
+  if (!hasRelay) return extra;
+  extra.sponsored = true;
+  const payer = feePayer?.trim();
+  if (payer) extra.feePayer = payer;
+  return extra;
+}
+
 function encodeB64Json(obj: unknown): string {
   const json = JSON.stringify(obj, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
   return btoa(json);
@@ -333,10 +354,8 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     payTo: recipient,
     maxTimeoutSeconds: 300,
   };
-  // Advertise gas sponsorship when the relay's service binding is wired: clients
-  // may then sign with `sponsored: true, fee: 0` and the relay pays the STX fee.
   const relay: SponsorRelay | undefined = env.X402_RELAY;
-  const extra = { ...(config.extra ?? {}), ...(relay ? { sponsored: true } : {}) };
+  const extra = buildPaymentExtra(config.extra, !!relay, env.X402_SPONSOR_FEE_PAYER);
   if (Object.keys(extra).length) paymentRequirements.extra = extra;
 
   const sig = c.req.header(X402_HEADERS.PAYMENT_SIGNATURE);

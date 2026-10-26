@@ -28,6 +28,9 @@ type Env = {
   /** Service binding to x402-sponsor-relay's RelayRPC. When set, the 402 advertises
    *  `extra.sponsored` and sponsored txs settle via sponsorPayment (relay pays gas). */
   X402_RELAY?: Fetcher;
+  /** The relay's sponsor address, advertised as `extra.feePayer` so x402-stacks
+   *  clients sign a sponsored fee-0 tx (they ignore `extra.sponsored`; #33). */
+  X402_SPONSOR_FEE_PAYER?: string;
   /** D1 database holding the provider directory (providers + provider_keys). */
   DB: D1Database;
   /** KV namespace for ephemeral data: wallet-auth replay nonces + legion stake cache. */
