@@ -74,6 +74,26 @@ interface SponsorRelay {
   ): Promise<SponsorPaymentResult>;
 }
 
+/** Relay `canSponsor`, memoized per isolate so a 402 doesn't always cost a fetch. */
+const SPONSOR_STATUS_TTL_MS = 60_000;
+let sponsorStatus: { relayUrl: string; canSponsor: boolean; at: number } | undefined;
+
+async function relayCanSponsor(relayUrl: string): Promise<boolean> {
+  const now = Date.now();
+  if (sponsorStatus?.relayUrl === relayUrl && now - sponsorStatus.at < SPONSOR_STATUS_TTL_MS) {
+    return sponsorStatus.canSponsor;
+  }
+  let canSponsor = false;
+  try {
+    const res = await fetch(`${relayUrl}/status/sponsor`, { signal: AbortSignal.timeout(2000) });
+    canSponsor = res.ok && ((await res.json()) as { canSponsor?: boolean }).canSponsor === true;
+  } catch {
+    /* unreachable relay → don't advertise sponsorship */
+  }
+  sponsorStatus = { relayUrl, canSponsor, at: now };
+  return canSponsor;
+}
+
 /** True when the tx was built with `sponsored: true` (sponsor slot left for the relay). */
 function isSponsoredTx(txHex: string | undefined): boolean {
   if (!txHex) return false;
@@ -333,10 +353,14 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     payTo: recipient,
     maxTimeoutSeconds: 300,
   };
-  // Advertise gas sponsorship when the relay's service binding is wired: clients
-  // may then sign with `sponsored: true, fee: 0` and the relay pays the STX fee.
+  // Advertise gas sponsorship when the relay's service binding and sponsor address
+  // are wired and the relay reports it can sponsor. x402-stacks keys on
+  // `extra.feePayer` (`sponsored` is kept for other readers): clients then sign with
+  // `sponsored: true, fee: 0` and the relay pays the STX fee.
   const relay: SponsorRelay | undefined = env.X402_RELAY;
-  const extra = { ...(config.extra ?? {}), ...(relay ? { sponsored: true } : {}) };
+  const feePayer: string | undefined = env.X402_SPONSOR_FEE_PAYER;
+  const sponsor = relay && feePayer && (await relayCanSponsor(relayUrl)) ? { feePayer, sponsored: true } : {};
+  const extra = { ...(config.extra ?? {}), ...sponsor };
   if (Object.keys(extra).length) paymentRequirements.extra = extra;
 
   const sig = c.req.header(X402_HEADERS.PAYMENT_SIGNATURE);

@@ -21,7 +21,10 @@
     "NETWORK": "mainnet",
     "RELAY_URL": "https://x402-relay.aibtc.com",
     "PRICE_MARKUP": "1.5",
-    "STACKS_API": "https://api.hiro.so"
+    "STACKS_API": "https://api.hiro.so",
+    // Relay sponsor advertised as 402 extra.feePayer (gasless payments). Remove to
+    // turn sponsorship off. Unset on testnet: the staging relay can't sponsor.
+    "X402_SPONSOR_FEE_PAYER": "SP3F6ZPHAR5D0YT0CTPJST7H3NBZ43A5FW226FMYP"
   },
   // Gas sponsorship: x402-sponsor-relay's RelayRPC (same CF account). Sponsored
   // payments settle through sponsorPayment — the public /settle never sponsors.

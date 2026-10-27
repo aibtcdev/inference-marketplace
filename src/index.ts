@@ -25,9 +25,12 @@ type Env = {
    *  never in a deployed env). Deployed gateways are always https-only. */
   ALLOW_LOCAL_ENDPOINTS?: string;
   RELAY_URL: string;
-  /** Service binding to x402-sponsor-relay's RelayRPC. When set, the 402 advertises
-   *  `extra.sponsored` and sponsored txs settle via sponsorPayment (relay pays gas). */
+  /** Service binding to x402-sponsor-relay's RelayRPC. Sponsored txs settle via
+   *  sponsorPayment (relay pays gas). */
   X402_RELAY?: Fetcher;
+  /** Relay sponsor address. With X402_RELAY set and the relay reporting `canSponsor`,
+   *  the 402 advertises `extra.feePayer` so clients sign sponsored, fee-0 txs. */
+  X402_SPONSOR_FEE_PAYER?: string;
   /** D1 database holding the provider directory (providers + provider_keys). */
   DB: D1Database;
   /** KV namespace for ephemeral data: wallet-auth replay nonces + legion stake cache. */
