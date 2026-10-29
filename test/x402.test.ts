@@ -24,7 +24,7 @@ const FEE_PAYER = 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM';
 const SELF_FEE = 499;
 
 /** Mutable network state the stubbed fetch answers from. */
-const net = { canSponsor: true, lastMempoolNonce: null as number | null, hiroUp: true };
+const net = { canSponsor: true, lastMempoolNonce: null as number | null, hiroUp: true, noEstimate: false };
 
 function stubFetch() {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -35,6 +35,7 @@ function stubFetch() {
       return Response.json({ possible_next_nonce: 7, last_mempool_tx_nonce: net.lastMempoolNonce, last_executed_tx_nonce: 6 });
     }
     if (url.includes('/v2/fees/transaction')) {
+      if (net.noEstimate) return Response.json({ error: 'Estimation could not be performed', reason: 'NoEstimateAvailable' }, { status: 400 });
       return Response.json({ estimations: [{ fee: 300 }, { fee: SELF_FEE }, { fee: 600 }] });
     }
     if (url.includes('/v2/fees/transfer')) return Response.json(1);
@@ -83,7 +84,7 @@ function signedTx(ex: Exchange) {
 }
 
 beforeEach(() => {
-  Object.assign(net, { canSponsor: true, lastMempoolNonce: null, hiroUp: true });
+  Object.assign(net, { canSponsor: true, lastMempoolNonce: null, hiroUp: true, noEstimate: false });
   resetSponsorStatus();
   relay.sponsorPayment.mockReset().mockResolvedValue({ success: true, txid: 'sponsored-tx', payer: 'payer', fee: '0' });
   verifierSettle.mockReset().mockResolvedValue({ success: true, transaction: 'self-tx', network: 'stacks:2147483648', payer: 'payer' });
@@ -120,6 +121,14 @@ describe('402 → signed tx', () => {
     expect(res.data.txid).toBe('self-tx');
   });
 
+
+  it('no fee estimate from Hiro (testnet) → falls back to transfer rate × tx length, like stacks.js', async () => {
+    net.canSponsor = false;
+    net.noEstimate = true;
+    // Own API base so the 60s estimate memo from earlier tests doesn't answer.
+    const res = await makeApp().request('http://gw/paid', { method: 'POST' }, { ...env, STACKS_API: 'https://hiro-noest.test' });
+    expect((await res.json()).accepts[0].extra.estimatedFeeUstx).toBe('350');
+  });
 });
 
 describe('self-paid settlement guard', () => {

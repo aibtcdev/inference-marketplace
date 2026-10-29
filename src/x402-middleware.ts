@@ -154,6 +154,8 @@ export async function payerPendingCheck(apiBase: string, payer: string): Promise
 const FEE_ESTIMATE_TTL_MS = 60_000;
 const feeEstimates = new Map<string, { fee: string | undefined; at: number }>();
 // Placeholder principal for the estimate payload (only its size/cost matter).
+// Byte length of a signed self-paid payment tx, for fee-rate × length estimates.
+const EST_TX_LEN = 350;
 const FEE_PLACEHOLDER = { mainnet: 'SP000000000000000000002Q6VF78', testnet: 'ST000000000000000000002AMW42H' };
 
 export async function estimateSelfPaidFee(apiBase: string, tokenType: TokenType, network: 'mainnet' | 'testnet'): Promise<string | undefined> {
@@ -172,13 +174,19 @@ export async function estimateSelfPaidFee(apiBase: string, tokenType: TokenType,
     const res = await fetch(`${apiBase}/v2/fees/transaction`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transaction_payload: serializePayload(payload), estimated_len: 350 }),
+      body: JSON.stringify({ transaction_payload: serializePayload(payload), estimated_len: EST_TX_LEN }),
       signal: AbortSignal.timeout(2000),
     });
     if (res.ok) {
       const est = ((await res.json()) as { estimations?: Array<{ fee?: number }> }).estimations;
       const mid = est?.[1]?.fee ?? est?.[0]?.fee;
       if (typeof mid === 'number' && mid > 0) fee = String(mid);
+    } else {
+      // NoEstimateAvailable (common on testnet): clients then pay the transfer fee
+      // rate × tx length (stacks.js estimateTransactionFeeWithFallback), so do the same.
+      const rr = await fetch(`${apiBase}/v2/fees/transfer`, { signal: AbortSignal.timeout(2000) });
+      const rate = rr.ok ? Number(await rr.text()) : NaN;
+      if (Number.isFinite(rate) && rate > 0) fee = String(Math.ceil(rate * EST_TX_LEN));
     }
   } catch {
     /* no estimate → omit the field */
