@@ -41,17 +41,31 @@ function authHeaders(apiKey: string): Record<string, string> {
  * JSON, so the gateway is a drop-in for any OpenAI/HF/vLLM client. `model` is set
  * by the caller after price resolution so the paid-for model is the served model.
  */
+export const UPSTREAM_TIMEOUT_MS = 120_000;
+
 export async function proxyChatCompletion(
   baseUrl: string,
   apiKey: string,
   body: ChatCompletionBody,
+  timeoutMs = UPSTREAM_TIMEOUT_MS,
 ): Promise<{ status: number; json: unknown }> {
-  const response = await fetch(joinUrl(baseUrl, '/chat/completions'), {
-    method: 'POST',
-    headers: authHeaders(apiKey),
-    // stream is not supported through the paid gateway yet — strip it.
-    body: JSON.stringify({ ...body, stream: false, max_tokens: body.max_tokens ?? 1024 }),
-  });
+  // Runs after settlement, so never throw: a network error or hung provider
+  // becomes a 502/504 the caller can still attach the payment receipt to.
+  let response: Response;
+  try {
+    response = await fetch(joinUrl(baseUrl, '/chat/completions'), {
+      method: 'POST',
+      headers: authHeaders(apiKey),
+      // stream is not supported through the paid gateway yet — strip it.
+      body: JSON.stringify({ ...body, stream: false, max_tokens: body.max_tokens ?? 1024 }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (e) {
+    const timedOut = e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError');
+    return timedOut
+      ? { status: 504, json: { error: 'Upstream provider timed out' } }
+      : { status: 502, json: { error: 'Upstream provider unreachable', details: String(e) } };
+  }
 
   const json = await response.json().catch(() => ({ error: 'Invalid upstream response' }));
   return { status: response.status, json };

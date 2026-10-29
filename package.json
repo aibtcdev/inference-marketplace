@@ -11,7 +11,8 @@
     "deploy:staging": "wrangler deploy --env staging",
     "deploy:production": "wrangler deploy",
     "tail": "wrangler tail",
-    "cf-typegen": "wrangler types"
+    "cf-typegen": "wrangler types",
+    "test": "vitest run"
   },
   "dependencies": {
     "@stacks/encryption": "^7.5.0",
@@ -21,7 +22,9 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250109.0",
+    "axios": "^1.15.2",
     "typescript": "^5.7.0",
+    "vitest": "^3.2.7",
     "wrangler": "^4.56.0"
   }
 }
