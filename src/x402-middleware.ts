@@ -25,7 +25,20 @@ import type {
   PaymentPayloadV2,
   SettlementResponseV2,
 } from 'x402-stacks';
-import { deserializeTransaction, AuthType } from '@stacks/transactions';
+import {
+  deserializeTransaction,
+  AuthType,
+  addressHashModeToVersion,
+  addressFromVersionHash,
+  addressToString,
+  createContractCallPayload,
+  createTokenTransferPayload,
+  serializePayload,
+  uintCV,
+  standardPrincipalCV,
+  someCV,
+  bufferCV,
+} from '@stacks/transactions';
 
 export type TokenType = 'STX' | 'sBTC' | 'USDCx';
 
@@ -94,14 +107,92 @@ async function relayCanSponsor(relayUrl: string): Promise<boolean> {
   return canSponsor;
 }
 
-/** True when the tx was built with `sponsored: true` (sponsor slot left for the relay). */
-function isSponsoredTx(txHex: string | undefined): boolean {
-  if (!txHex) return false;
+/** Forget the memoized `canSponsor` so the next check asks the relay again. */
+export function resetSponsorStatus(): void {
+  sponsorStatus = undefined;
+}
+
+/** What the gateway needs from a signed payment tx: auth type, origin (payer) and fee. */
+export interface PaymentTxInfo {
+  sponsored: boolean;
+  origin: string;
+  nonce: bigint;
+  fee: bigint;
+}
+
+export function decodePaymentTx(txHex: string | undefined, network: 'mainnet' | 'testnet'): PaymentTxInfo | null {
+  if (!txHex) return null;
   try {
-    return deserializeTransaction(txHex.replace(/^0x/, '')).auth.authType === AuthType.Sponsored;
+    const tx = deserializeTransaction(txHex.replace(/^0x/, ''));
+    const sc = tx.auth.spendingCondition;
+    const origin = addressToString(addressFromVersionHash(addressHashModeToVersion(sc.hashMode, network), sc.signer));
+    return { sponsored: tx.auth.authType === AuthType.Sponsored, origin, nonce: BigInt(sc.nonce), fee: BigInt(sc.fee) };
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * Refuse a self-paid payment while the payer already has a tx in the mempool.
+ * A sponsored payment whose response was lost can still be pending; a self-paid
+ * retry would take the next nonce and both could confirm (double charge). Same
+ * rule as the relay's SponsorWallet.checkSender, and likewise fail closed when
+ * the Stacks API can't be read. Returns a reason code, or null when clear.
+ */
+export async function payerPendingCheck(apiBase: string, payer: string): Promise<null | 'PAYER_TX_PENDING' | 'PAYER_NONCE_UNAVAILABLE'> {
+  try {
+    const res = await fetch(`${apiBase}/extended/v1/address/${payer}/nonces`, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) return 'PAYER_NONCE_UNAVAILABLE';
+    const n = (await res.json()) as { last_mempool_tx_nonce?: number | null };
+    return n.last_mempool_tx_nonce != null ? 'PAYER_TX_PENDING' : null;
+  } catch {
+    return 'PAYER_NONCE_UNAVAILABLE';
+  }
+}
+
+/** Self-paid fee estimate (uSTX) for the payment tx, memoized per isolate. */
+const FEE_ESTIMATE_TTL_MS = 60_000;
+const feeEstimates = new Map<string, { fee: string | undefined; at: number }>();
+// Placeholder principal for the estimate payload (only its size/cost matter).
+// Byte length of a signed self-paid payment tx, for fee-rate × length estimates.
+const EST_TX_LEN = 350;
+const FEE_PLACEHOLDER = { mainnet: 'SP000000000000000000002Q6VF78', testnet: 'ST000000000000000000002AMW42H' };
+
+export async function estimateSelfPaidFee(apiBase: string, tokenType: TokenType, network: 'mainnet' | 'testnet'): Promise<string | undefined> {
+  const key = `${apiBase}|${network}|${tokenType}`;
+  const now = Date.now();
+  const hit = feeEstimates.get(key);
+  if (hit && now - hit.at < FEE_ESTIMATE_TTL_MS) return hit.fee;
+  let fee: string | undefined;
+  try {
+    const who = FEE_PLACEHOLDER[network];
+    const payload = tokenType === 'STX'
+      ? createTokenTransferPayload(who, 1n)
+      : createContractCallPayload(TOKEN_CONTRACTS[network][tokenType].address, TOKEN_CONTRACTS[network][tokenType].name, 'transfer', [
+          uintCV(1), standardPrincipalCV(who), standardPrincipalCV(who), someCV(bufferCV(new Uint8Array(34))),
+        ]);
+    const res = await fetch(`${apiBase}/v2/fees/transaction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transaction_payload: serializePayload(payload), estimated_len: EST_TX_LEN }),
+      signal: AbortSignal.timeout(2000),
+    });
+    if (res.ok) {
+      const est = ((await res.json()) as { estimations?: Array<{ fee?: number }> }).estimations;
+      const mid = est?.[1]?.fee ?? est?.[0]?.fee;
+      if (typeof mid === 'number' && mid > 0) fee = String(mid);
+    } else {
+      // NoEstimateAvailable (common on testnet): clients then pay the transfer fee
+      // rate × tx length (stacks.js estimateTransactionFeeWithFallback), so do the same.
+      const rr = await fetch(`${apiBase}/v2/fees/transfer`, { signal: AbortSignal.timeout(2000) });
+      const rate = rr.ok ? Number(await rr.text()) : NaN;
+      if (Number.isFinite(rate) && rate > 0) fee = String(Math.ceil(rate * EST_TX_LEN));
+    }
+  } catch {
+    /* no estimate → omit the field */
+  }
+  feeEstimates.set(key, { fee, at: now });
+  return fee;
 }
 
 // Bindings are `any` so these helpers compose with any app Env.
@@ -359,9 +450,27 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
   // `sponsored: true, fee: 0` and the relay pays the STX fee.
   const relay: SponsorRelay | undefined = env.X402_RELAY;
   const feePayer: string | undefined = env.X402_SPONSOR_FEE_PAYER;
-  const sponsor = relay && feePayer && (await relayCanSponsor(relayUrl)) ? { feePayer, sponsored: true } : {};
+  // Not sponsoring → the client pays the STX fee on top of `amount`; advertise an
+  // estimate (`extra.estimatedFeeUstx`) so it can apply its own ceiling.
+  const apiBase = stacksApiBase(env, network);
+  const selfPaidExtra = async () => {
+    const estimatedFeeUstx = await estimateSelfPaidFee(apiBase, tokenType, network);
+    return estimatedFeeUstx ? { estimatedFeeUstx } : {};
+  };
+  const canSponsor = !!(relay && feePayer && (await relayCanSponsor(relayUrl)));
+  const sponsor = canSponsor ? { feePayer, sponsored: true } : await selfPaidExtra();
   const extra = { ...(config.extra ?? {}), ...sponsor };
   if (Object.keys(extra).length) paymentRequirements.extra = extra;
+
+  // A sponsored settle failed. If the relay can no longer sponsor, hand back
+  // self-paid requirements so the client can re-sign in one round trip instead
+  // of waiting out the canSponsor memo.
+  const sponsorFailureHint = async (): Promise<Record<string, unknown>> => {
+    resetSponsorStatus();
+    if (await relayCanSponsor(relayUrl)) return {};
+    const selfPaid: PaymentRequirementsV2 = { ...paymentRequirements, extra: { ...(config.extra ?? {}), ...(await selfPaidExtra()) } };
+    return { retrySelfPaid: true, accepts: [selfPaid] };
+  };
 
   const sig = c.req.header(X402_HEADERS.PAYMENT_SIGNATURE);
 
@@ -380,8 +489,13 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     return c.json({ error: 'Invalid payment-signature header', code: X402_ERROR_CODES.INVALID_PAYLOAD }, 400);
   }
 
+  const txInfo = decodePaymentTx(payload.payload?.transaction, network);
+  if (!txInfo) {
+    return c.json({ error: 'Invalid payment transaction', code: X402_ERROR_CODES.INVALID_PAYLOAD }, 400);
+  }
+
   let settleResult: SettlementResponseV2;
-  if (relay && isSponsoredTx(payload.payload?.transaction)) {
+  if (relay && txInfo.sponsored) {
     // Sponsored tx → the relay co-signs, pays the fee and broadcasts (binding-only;
     // the public /settle refuses an empty sponsor slot). Self-paid txs fall through.
     let sponsored: SponsorPaymentResult;
@@ -398,6 +512,7 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
         error: 'Settlement relay error',
         code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
         details: String(error),
+        ...(await sponsorFailureHint()),
       }, 502);
     }
     if (!sponsored.success) {
@@ -409,10 +524,25 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
         retryable: sponsored.retryable,
         asset: paymentRequirements.asset,
         network: networkV2,
+        ...(await sponsorFailureHint()),
       }, sponsored.retryable ? 503 : 402);
     }
     settleResult = { success: true, transaction: sponsored.txid, network: networkV2, payer: sponsored.payer };
   } else {
+    // Self-paid: the relay broadcasts as-is, so guard against a still-pending
+    // earlier payment from this payer (see payerPendingCheck).
+    const pending = await payerPendingCheck(apiBase, txInfo.origin);
+    if (pending) {
+      return c.json({
+        error: pending === 'PAYER_TX_PENDING'
+          ? 'Payer has a pending transaction; retry once it confirms or drops'
+          : 'Could not read payer nonce state; retry shortly',
+        code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+        reason: pending,
+        retryable: true,
+        payer: txInfo.origin,
+      }, pending === 'PAYER_TX_PENDING' ? 409 : 503);
+    }
     try {
       const verifier = new X402PaymentVerifier(relayUrl);
       settleResult = await verifier.settle(payload, { paymentRequirements });
