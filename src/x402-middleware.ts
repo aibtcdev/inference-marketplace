@@ -307,7 +307,7 @@ interface LegionRouteCfg {
   amount: string;       // quoted routed amount (sBTC base units)
   recipient: string;    // provider that must receive the 92% leg (route `to`)
   network: 'mainnet' | 'testnet';
-  networkV2: string;
+  networkV2: SettlementResponseV2['network'];
   feeContract?: string; // per-model legion-fees-<family>; falls back to env.LEGION_FEES
   treasury?: string;    // per-model legion-treasury-<family>; falls back to env.LEGION_TREASURY
 }
@@ -438,8 +438,8 @@ async function settleViaLegionRoute(c: Ctx, cfg: LegionRouteCfg): Promise<Respon
   if (minConf > 0 && Number.isFinite(tx.block_height)) {
     try {
       const tr = await fetch(`${stacksApiBase(env, cfg.network)}/extended/v1/block?limit=1`);
-      const tip = tr.ok ? (await tr.json())?.results?.[0]?.height : undefined;
-      if (Number.isFinite(tip) && tip - tx.block_height < minConf) {
+      const tip = tr.ok ? ((await tr.json()) as { results?: Array<{ height?: number }> })?.results?.[0]?.height : undefined;
+      if (typeof tip === 'number' && Number.isFinite(tip) && tip - tx.block_height < minConf) {
         return fail('insufficient confirmations', { conf: tip - tx.block_height, need: minConf });
       }
     } catch { /* tip lookup best-effort; canonical guard already applied */ }
