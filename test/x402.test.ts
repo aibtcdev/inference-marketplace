@@ -16,7 +16,7 @@ vi.mock('x402-stacks', async (orig) => ({
 }));
 
 const { wrapAxiosWithPayment, privateKeyToAccount } = await import('x402-stacks');
-const { x402Middleware, decodePaymentTx, resetSponsorStatus } = await import('../src/x402-middleware');
+const { x402Middleware, decodePaymentTx, resetSponsorStatus, issueRetryCredit, RETRY_CREDIT_MAX_ATTEMPTS } = await import('../src/x402-middleware');
 const { proxyChatCompletion } = await import('../src/upstream');
 
 const PAY_TO = 'ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW';
@@ -193,5 +193,47 @@ describe('upstream after settlement', () => {
     })));
     const r = await proxyChatCompletion('https://p.test/v1', '', { model: 'm', messages: [] }, 20);
     expect(r.status).toBe(504);
+  });
+});
+
+describe('retry credit after a paid upstream failure', () => {
+  function memKV() {
+    const m = new Map<string, string>();
+    return { m, get: async (k: string) => m.get(k) ?? null, put: async (k: string, v: string) => { m.set(k, v); }, delete: async (k: string) => { m.delete(k); } };
+  }
+  const retryReq = (app: Hono, token: string, e: object) =>
+    app.request('http://gw/paid', { method: 'POST', headers: { 'X-PAYMENT-RETRY-TOKEN': token } }, e);
+
+  it('a token re-serves the request once, for the provider that was paid, without settling', async () => {
+    const kv = memKV();
+    const token = (await issueRetryCredit(kv, { txid: 'paid-tx', payTo: PAY_TO, payer: 'SPPAYER' }))!;
+    const app = makeApp();
+    const e = { ...env, PROVIDERS: kv };
+
+    const ok = await retryReq(app, token, e);
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).txid).toBe('paid-tx');
+    expect(relay.sponsorPayment).not.toHaveBeenCalled();
+    expect(verifierSettle).not.toHaveBeenCalled();
+
+    const again = await retryReq(app, token, e);
+    expect(again.status).toBe(402);
+    expect((await again.json()).code).toBe('RETRY_TOKEN_INVALID');
+  });
+
+  it('refuses a token paid to another provider and keeps it usable', async () => {
+    const kv = memKV();
+    const token = (await issueRetryCredit(kv, { txid: 'paid-tx', payTo: 'ST-OTHER', payer: 'SPPAYER' }))!;
+    const res = await retryReq(makeApp(), token, { ...env, PROVIDERS: kv });
+    expect(res.status).toBe(402);
+    expect(await res.json()).toMatchObject({ code: 'RETRY_TOKEN_WRONG_PROVIDER', paidTo: 'ST-OTHER' });
+    expect(kv.m.has(`retry:${token}`)).toBe(true);
+  });
+
+  it('stops issuing tokens after the retry cap, and never for the dev bypass', async () => {
+    const kv = memKV();
+    expect(await issueRetryCredit(kv, { txid: 'paid-tx', payTo: PAY_TO, attempts: RETRY_CREDIT_MAX_ATTEMPTS })).toBeNull();
+    expect(await issueRetryCredit(kv, { txid: 'dev-skip', payTo: PAY_TO })).toBeNull();
+    expect(kv.m.size).toBe(0);
   });
 });
