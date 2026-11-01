@@ -402,6 +402,13 @@ export async function setHealth(db: DB, id: string, health: HealthResult): Promi
   return getProvider(db, id);
 }
 
+/** True when the router would send traffic to this provider: live, not
+ *  flagged, and priced. The chat route and skill.md's worked example both use
+ *  this so the doc never names a model the router refuses. */
+export function isRoutable(p: Provider): boolean {
+  return p.status === 'live' && !p.flagged && !!p.pricePerRequest;
+}
+
 /** Flag (or clear) a provider. A flagged provider is de-routed regardless of
  *  health; clearing restores it to normal routing. Enforcement lives here, not
  *  in the inference plane. */

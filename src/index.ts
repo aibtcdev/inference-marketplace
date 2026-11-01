@@ -295,7 +295,7 @@ app.post('/v1/chat/completions',
     // pick the highest-staked one for the model (staking buys ranking; never required).
     const providers = await directory.listProviders(c.env.DB);
     const candidates = providers.filter(
-      (p) => p.status === 'live' && !p.flagged && p.pricePerRequest && p.models.some((m) => m.id === body.model),
+      (p) => directory.isRoutable(p) && p.models.some((m) => m.id === body.model),
     );
     const provider = (await rankByStake(c.env, candidates))[0];
     const model = provider?.models.find((m) => m.id === body.model);
