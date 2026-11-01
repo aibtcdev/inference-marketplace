@@ -114,6 +114,20 @@ curl -X POST https://inference.aibtc.com/v1/chat/completions \
 
 Agents on AIBTC pay automatically via `execute_x402_endpoint` (probe → sign → settle).
 
+**Self-paid double-charge guard.** When the relay can't sponsor gas, the 402 omits
+`extra.feePayer` and carries `extra.estimatedFeeUstx`; the client signs and pays
+the STX fee itself. Before settling a self-paid payment the gateway refuses with
+409 `PAYER_TX_PENDING` while the payer has a tx in the mempool, and with 503
+`PAYER_NONCE_UNAVAILABLE` when the Stacks API can't be read (fail closed). The
+check only sees the mempool: a payment signed at the same nonce but not yet
+broadcast is invisible to it, so a client should not hold a signed payment and
+re-sign another for the same request.
+
+**Paid retry.** If the provider fails after payment settled (5xx / timeout), the
+response's `_marketplace.retry.token` lets the client re-send the request to the
+same provider with `X-PAYMENT-RETRY-TOKEN` instead of paying again (10 min, up to
+3 retries per payment).
+
 ## Architecture
 
 | File | Role |
