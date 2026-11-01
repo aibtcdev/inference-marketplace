@@ -61,6 +61,8 @@ export interface X402Context {
   settleResult: SettlementResponseV2;
   paymentPayload?: PaymentPayloadV2;
   paymentRequirements?: PaymentRequirementsV2;
+  /** Set when this request was funded by a retry token, not a new payment. */
+  retry?: { attempts: number };
 }
 
 // Correct mainnet/testnet token contracts (asset = `${address}.${name}` in v2).
@@ -193,6 +195,77 @@ export async function estimateSelfPaidFee(apiBase: string, tokenType: TokenType,
   }
   feeEstimates.set(key, { fee, at: now });
   return fee;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Retry credit: a paid request whose provider then failed (5xx / timeout)
+// gets a one-time token the client can send instead of paying again.
+// ─────────────────────────────────────────────────────────────────────────
+
+export const RETRY_TOKEN_HEADER = 'X-PAYMENT-RETRY-TOKEN';
+export const RETRY_CREDIT_TTL_SECONDS = 600;
+/** Paid retries one settled payment can fund before the client must pay again. */
+export const RETRY_CREDIT_MAX_ATTEMPTS = 3;
+
+interface RetryKV {
+  get(k: string): Promise<string | null>;
+  put(k: string, v: string, o?: { expirationTtl?: number }): Promise<void>;
+  delete(k: string): Promise<void>;
+}
+
+interface RetryCredit {
+  txid: string;
+  payTo: string;
+  payer: string;
+  attempts: number;
+}
+
+/**
+ * Record a settled payment whose request failed upstream, keyed by a random
+ * token returned only to that client. Bound to the paid recipient (`payTo`):
+ * payment is non-custodial, so only the provider that was paid can serve it.
+ * Returns the token, or null when the payment can't be credited.
+ */
+export async function issueRetryCredit(
+  kv: RetryKV | undefined,
+  credit: { txid?: string; payTo: string; payer?: string; attempts?: number },
+): Promise<string | null> {
+  if (!kv || !credit.txid || credit.txid === 'dev-skip') return null;
+  const attempts = credit.attempts ?? 0;
+  if (attempts >= RETRY_CREDIT_MAX_ATTEMPTS) return null;
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  const token = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  const value: RetryCredit = { txid: credit.txid, payTo: credit.payTo, payer: credit.payer || 'unknown', attempts };
+  await kv.put(`retry:${token}`, JSON.stringify(value), { expirationTtl: RETRY_CREDIT_TTL_SECONDS });
+  return token;
+}
+
+/** Redeem a retry token for this recipient (consumes it). Returns a Response on refusal. */
+async function redeemRetryCredit(c: Ctx, token: string, recipient: string, networkV2: SettlementResponseV2["network"]): Promise<Response | null> {
+  const kv = c.env.PROVIDERS as RetryKV | undefined;
+  const key = `retry:${token}`;
+  const raw = kv ? await kv.get(key) : null;
+  if (!kv || !raw) {
+    return c.json({ error: 'Retry token unknown, expired or already used — pay again', code: 'RETRY_TOKEN_INVALID' }, 402);
+  }
+  const credit = JSON.parse(raw) as RetryCredit;
+  if (credit.payTo !== recipient) {
+    // Keep the token: the client may still use it on the provider it paid.
+    return c.json({
+      error: 'Retry token was paid to a different provider; retry via that provider',
+      code: 'RETRY_TOKEN_WRONG_PROVIDER',
+      paidTo: credit.payTo,
+    }, 402);
+  }
+  await kv.delete(key);
+  c.set('x402', {
+    payerAddress: credit.payer,
+    settleResult: { success: true, transaction: credit.txid, network: networkV2, payer: credit.payer },
+    retry: { attempts: credit.attempts + 1 },
+  });
+  c.header('X-PAYER-ADDRESS', credit.payer);
+  return null;
 }
 
 // Bindings are `any` so these helpers compose with any app Env.
@@ -418,6 +491,11 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     c.header('X-PAYER-ADDRESS', 'dev-bypass');
     return null;
   }
+
+  // A paid request that failed upstream returned a one-time retry token; honor
+  // it instead of charging again (see issueRetryCredit).
+  const retryToken = c.req.header(RETRY_TOKEN_HEADER);
+  if (retryToken) return redeemRetryCredit(c, retryToken, recipient, networkV2);
 
   // Option B — Legion fee-rail scheme. When LEGION_FEES is configured, payment
   // settles through the Legion's `legion-fees.route` (8% → treasury, 92% →

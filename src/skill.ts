@@ -102,6 +102,11 @@ curl -X POST ${origin}/v1/chat/completions \\
 3. Retry with header \`payment-signature: <base64 PaymentPayloadV2>\`. The gateway
    settles and returns the completion. Each response carries a \`_marketplace\`
    receipt including the settlement \`txId\`.
+4. If the provider fails after you paid (5xx / timeout), \`_marketplace.retry\`
+   carries a one-time \`token\`. Re-send the same request to
+   \`_marketplace.retry.route\` with header \`X-PAYMENT-RETRY-TOKEN: <token>\`
+   (no \`payment-signature\`) to retry without paying again. Valid 10 minutes,
+   only for the provider you paid, up to 3 retries per payment.
 
 The 402 asks for the serving provider's flat per-request price, in the token
 that provider is paid in — the same amount shown in the table below.

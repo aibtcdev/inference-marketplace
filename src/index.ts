@@ -6,7 +6,7 @@
 import { Hono } from 'hono';
 import type { Context, Next } from 'hono';
 import { cors } from 'hono/cors';
-import { x402Middleware, x402DynamicMiddleware } from './x402-middleware';
+import { x402Middleware, x402DynamicMiddleware, issueRetryCredit, RETRY_TOKEN_HEADER, RETRY_CREDIT_TTL_SECONDS } from './x402-middleware';
 import type { X402Context, TokenType } from './x402-middleware';
 import { proxyChatCompletion } from './upstream';
 import type { ChatCompletionBody } from './upstream';
@@ -146,13 +146,35 @@ async function routeToProvider(
   const upstream = await proxyChatCompletion(provider.endpoint, key, { ...body, model: upstreamModel });
   const upstreamObj = (typeof upstream.json === 'object' && upstream.json) ? upstream.json as Record<string, unknown> : {};
 
+  // Paid but the provider failed: hand back a one-time token so a retry to the
+  // same provider doesn't pay again. Payment went to this provider's wallet
+  // (non-custodial), so the credit can't be spent on another provider.
+  let retry: Record<string, unknown> | undefined;
+  if (upstream.status >= 500) {
+    const token = await issueRetryCredit(c.env.PROVIDERS, {
+      txid: payment?.settleResult?.transaction,
+      payTo: provider.payoutAddress,
+      payer: payment?.payerAddress,
+      attempts: payment?.retry?.attempts,
+    });
+    if (token) {
+      retry = {
+        token,
+        header: RETRY_TOKEN_HEADER,
+        route: `/v1/route/${provider.id}/chat/completions`,
+        expiresInSeconds: RETRY_CREDIT_TTL_SECONDS,
+      };
+    }
+  }
+
   return c.json({
     ...upstreamObj,
     _marketplace: {
       model: body.model,
       provider: provider.id,
       paidTo: provider.payoutAddress,
-      payment: { txId: payment?.settleResult?.transaction, payer: payment?.payerAddress },
+      payment: { txId: payment?.settleResult?.transaction, payer: payment?.payerAddress, ...(payment?.retry ? { retryAttempt: payment.retry.attempts } : {}) },
+      ...(retry ? { retry } : {}),
     },
   }, upstream.status as 200);
 }
@@ -163,7 +185,7 @@ const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 app.use('*', cors({
   origin: '*',
   allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['payment-signature', 'X-PAYMENT-TOKEN-TYPE', 'Authorization', 'Content-Type', 'X-Stacks-Signature', 'X-Stacks-Public-Key', 'X-Stacks-Timestamp', 'X-Admin-Token'],
+  allowHeaders: ['payment-signature', 'X-PAYMENT-TOKEN-TYPE', 'Authorization', 'Content-Type', 'X-Stacks-Signature', 'X-Stacks-Public-Key', 'X-Stacks-Timestamp', 'X-Admin-Token', RETRY_TOKEN_HEADER],
   exposeHeaders: ['payment-required', 'payment-response', 'X-PAYER-ADDRESS'],
 }));
 
