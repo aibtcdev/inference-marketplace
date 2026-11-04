@@ -543,11 +543,16 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
   // A sponsored settle failed. If the relay can no longer sponsor, hand back
   // self-paid requirements so the client can re-sign in one round trip instead
   // of waiting out the canSponsor memo.
-  const sponsorFailureHint = async (): Promise<Record<string, unknown>> => {
+  // The failed sponsored tx may still mine: a thrown/timed-out call, and a
+  // BROADCAST_FAILED after a send the node may hold, both leave its state unknown.
+  // So the hint pins `nonce` to the sponsored tx's sender nonce. A self-paid
+  // re-sign at that nonce can never mine alongside it (the node accepts one tx
+  // per sender nonce); one at the next nonce could, charging the payer twice.
+  const sponsorFailureHint = async (nonce: bigint): Promise<Record<string, unknown>> => {
     resetSponsorStatus();
     if (await relayCanSponsor(relayUrl)) return {};
     const selfPaid: PaymentRequirementsV2 = { ...paymentRequirements, extra: { ...(config.extra ?? {}), ...(await selfPaidExtra()) } };
-    return { retrySelfPaid: true, accepts: [selfPaid] };
+    return { retrySelfPaid: true, nonce: nonce.toString(), accepts: [selfPaid] };
   };
 
   const sig = c.req.header(X402_HEADERS.PAYMENT_SIGNATURE);
@@ -590,7 +595,7 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
         error: 'Settlement relay error',
         code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
         details: String(error),
-        ...(await sponsorFailureHint()),
+        ...(await sponsorFailureHint(txInfo.nonce)),
       }, 502);
     }
     if (!sponsored.success) {
@@ -602,7 +607,7 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
         retryable: sponsored.retryable,
         asset: paymentRequirements.asset,
         network: networkV2,
-        ...(await sponsorFailureHint()),
+        ...(await sponsorFailureHint(txInfo.nonce)),
       }, sponsored.retryable ? 503 : 402);
     }
     settleResult = { success: true, transaction: sponsored.txid, network: networkV2, payer: sponsored.payer };

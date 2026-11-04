@@ -168,8 +168,21 @@ describe('sponsored settle failure', () => {
     await expect(client(makeApp(), log).post('/paid', {})).rejects.toThrow();
     expect(log[1].status).toBe(503);
     expect(log[1].body.retrySelfPaid).toBe(true);
+    expect(log[1].body.nonce).toBe(signedTx(log[1]).nonce.toString());
     expect(log[1].body.accepts[0].extra.feePayer).toBeUndefined();
     expect(log[1].body.accepts[0].extra.estimatedFeeUstx).toBe(String(SELF_FEE));
+  });
+
+  it('pins the nonce when the relay call throws (broadcast state unknown)', async () => {
+    relay.sponsorPayment.mockImplementation(async () => {
+      net.canSponsor = false;
+      throw new Error('rpc timeout');
+    });
+    const log: Exchange[] = [];
+    await expect(client(makeApp(), log).post('/paid', {})).rejects.toThrow();
+    expect(log[1].status).toBe(502);
+    expect(log[1].body.retrySelfPaid).toBe(true);
+    expect(log[1].body.nonce).toBe(signedTx(log[1]).nonce.toString());
   });
 
   it('no self-pay hint while the relay still reports canSponsor', async () => {
@@ -177,6 +190,7 @@ describe('sponsored settle failure', () => {
     const log: Exchange[] = [];
     await expect(client(makeApp(), log).post('/paid', {})).rejects.toThrow();
     expect(log[1].body.retrySelfPaid).toBeUndefined();
+    expect(log[1].body.nonce).toBeUndefined();
   });
 });
 

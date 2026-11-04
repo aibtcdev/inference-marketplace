@@ -123,6 +123,14 @@ check only sees the mempool: a payment signed at the same nonce but not yet
 broadcast is invisible to it, so a client should not hold a signed payment and
 re-sign another for the same request.
 
+**Self-paid retry after a sponsored failure.** If a sponsored settle fails and the
+relay can no longer sponsor, the error carries `retrySelfPaid: true`, self-paid
+`accepts`, and `nonce`: the sender nonce of the sponsored tx that failed. Re-sign
+self-paid at exactly that nonce. The failed tx may still mine (a timed-out relay
+call or an unclear broadcast leaves its state unknown), and the node accepts only
+one tx per sender nonce, so at most one of the two can confirm. A re-sign at the
+next nonce could confirm alongside it and pay twice.
+
 **Paid retry.** If the provider fails after payment settled (5xx / timeout), the
 response's `_marketplace.retry.token` lets the client re-send the request to the
 same provider with `X-PAYMENT-RETRY-TOKEN` instead of paying again (10 min, up to
