@@ -41,3 +41,12 @@ CREATE TABLE IF NOT EXISTS provider_keys (
   id         TEXT PRIMARY KEY,
   shared_key TEXT NOT NULL
 );
+
+-- Payment txids already credited to a request (x402 settle or used-nonce
+-- reconciliation). The primary key makes claiming a txid atomic. Pruned by the
+-- cron after 8 days. Existing DBs: run this statement.
+CREATE TABLE IF NOT EXISTS payment_marks (
+  txid      TEXT PRIMARY KEY,  -- lowercase hex, no 0x
+  marked_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_payment_marks_at ON payment_marks(marked_at);

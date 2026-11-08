@@ -16,7 +16,8 @@ vi.mock('x402-stacks', async (orig) => ({
 }));
 
 const { wrapAxiosWithPayment, privateKeyToAccount } = await import('x402-stacks');
-const { x402Middleware, decodePaymentTx, resetSponsorStatus, issueRetryCredit, RETRY_CREDIT_MAX_ATTEMPTS } = await import('../src/x402-middleware');
+const { x402Middleware, decodePaymentTx, resetSponsorStatus, issueRetryCredit, RETRY_CREDIT_MAX_ATTEMPTS, markPaymentUsed, PAYMENT_MARKS_SINCE } = await import('../src/x402-middleware');
+const { makeD1 } = await import('./d1');
 const { proxyChatCompletion } = await import('../src/upstream');
 
 const PAY_TO = 'ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW';
@@ -54,15 +55,14 @@ function makeApp() {
 }
 
 const relay = { sponsorPayment: vi.fn() };
-const kvStore = new Map<string, string>();
-const kv = { get: async (k: string) => kvStore.get(k) ?? null, put: async (k: string, v: string) => void kvStore.set(k, v) };
+let db = makeD1();
 const env = {
   NETWORK: 'testnet',
   RELAY_URL: 'https://relay.test',
   STACKS_API: 'https://hiro.test',
   X402_SPONSOR_FEE_PAYER: FEE_PAYER,
   X402_RELAY: relay,
-  PROVIDERS: kv,
+  get DB() { return db; },
 };
 
 /** Every request the client sends, with the response the gateway gave it. */
@@ -91,7 +91,7 @@ function signedTx(ex: Exchange) {
 
 beforeEach(() => {
   Object.assign(net, { canSponsor: true, lastMempoolNonce: null, lastExecutedNonce: 6, hiroUp: true, noEstimate: false, usedTx: null });
-  kvStore.clear();
+  db = makeD1();
   resetSponsorStatus();
   relay.sponsorPayment.mockReset().mockResolvedValue({ success: true, txid: 'sponsored-tx', payer: 'payer', fee: '0' });
   verifierSettle.mockReset().mockResolvedValue({ success: true, transaction: 'self-tx', network: 'stacks:2147483648', payer: 'payer' });
@@ -186,10 +186,18 @@ describe('used-nonce reconciliation (#43)', () => {
     },
     ...over,
   });
-  beforeEach(() => { net.canSponsor = false; net.lastExecutedNonce = 7; });
+  // Pin the clock after the D1 marks deploy (PAYMENT_MARKS_SINCE).
+  const NOW = (PAYMENT_MARKS_SINCE + 30 * 24 * 3600) * 1000;
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    net.canSponsor = false;
+    net.lastExecutedNonce = 7;
+  });
+  afterEach(() => vi.useRealTimers());
 
   /** Runs one paid request; the mined tx is built from the signing payer. */
-  async function pay(over: Record<string, unknown> = {}) {
+  function payer(over: Record<string, unknown> = {}) {
     const log: Exchange[] = [];
     const api = client(makeApp(), log);
     api.interceptors.request.use((cfg) => {
@@ -197,8 +205,10 @@ describe('used-nonce reconciliation (#43)', () => {
       if (sig) net.usedTx = minedTx(decodePaymentTx(JSON.parse(atob(sig)).payload.transaction, 'testnet')!.origin, over);
       return cfg;
     });
-    const res = await api.post('/paid', {}).catch((e: AxiosError) => e.response!);
-    return { res, log };
+    return () => api.post('/paid', {}).catch((e: AxiosError) => e.response!);
+  }
+  async function pay(over: Record<string, unknown> = {}) {
+    return { res: await payer(over)() };
   }
 
   it('accepts the confirmed payment that used the nonce, once', async () => {
@@ -221,12 +231,29 @@ describe('used-nonce reconciliation (#43)', () => {
     expect(claim.res.data.detail).toBe('already credited to another request');
   });
 
+  it('accepts a payment mined days ago (inside the window)', async () => {
+    const { res } = await pay({ block_time: NOW / 1000 - 3 * 24 * 3600 });
+    expect(res.status).toBe(200);
+  });
+
+  it('two concurrent claims of one payment: exactly one is served', async () => {
+    const post = payer();
+    const results = await Promise.all([post(), post()]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 402]);
+  });
+
+  it('markPaymentUsed claims a txid once, case- and 0x-insensitively', async () => {
+    const d = makeD1();
+    expect(await Promise.all([markPaymentUsed(d, '0xABC'), markPaymentUsed(d, 'abc')])).toEqual([true, false]);
+  });
+
   it.each([
     ['failed tx', { tx_status: 'abort_by_response' }, 'tx_status=abort_by_response'],
     ['underpaid', { contract_call: { contract_id: SBTC, function_name: 'transfer', function_args: [{ name: 'amount', repr: 'u0' }, { repr: "'x" }, { name: 'recipient', repr: `'${PAY_TO}` }] } }, 'underpaid'],
     ['wrong recipient', { contract_call: { contract_id: SBTC, function_name: 'transfer', function_args: [{ name: 'amount', repr: 'u1' }, { repr: "'x" }, { name: 'recipient', repr: "'ST000000000000000000002AMW42H" }] } }, 'wrong recipient'],
     ['wrong token', { contract_call: { contract_id: 'ST1.other', function_name: 'transfer', function_args: [] } }, 'wrong token'],
-    ['too old', { block_time: Math.floor(Date.now() / 1000) - 3600 }, 'older than the reconcile window'],
+    ['tx older than 7 days', { block_time: NOW / 1000 - 8 * 24 * 3600 }, 'older than the reconcile window'],
+    ['tx mined before marks were durable', { block_time: PAYMENT_MARKS_SINCE - 60 }, 'older than the reconcile window'],
   ])('refuses a %s', async (_l, over, detail) => {
     const { res } = await pay(over);
     expect(res.status).toBe(402);

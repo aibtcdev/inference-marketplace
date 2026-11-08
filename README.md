@@ -136,8 +136,8 @@ itself (`SENDER_NONCE_STALE`, `SENDER_NONCE_GAP`); sign at the next nonce then.
 If the failed sponsored tx confirmed before the re-sign arrives, the re-sign's
 nonce is already used. The gateway then looks up the tx that used it and accepts
 it as the payment when it succeeded, paid at least the price in the advertised
-token to `payTo`, confirmed within the last 15 minutes, and hasn't paid for
-another request. Otherwise it returns 402 `PAYER_NONCE_USED` with a `detail`.
+token to `payTo`, confirmed within the last 7 days, and hasn't paid for
+another request (each txid can be claimed once). Otherwise it returns 402 `PAYER_NONCE_USED` with a `detail`.
 
 **Paid retry.** If the provider fails after payment settled (5xx / timeout), the
 response's `_marketplace.retry.token` lets the client re-send the request to the

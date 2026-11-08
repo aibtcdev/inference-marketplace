@@ -174,19 +174,42 @@ export async function payerPendingCheck(
 // recent, successful, full payment to payTo that no request has used yet.
 // ─────────────────────────────────────────────────────────────────────────
 
-type MarkKV = { get(k: string): Promise<string | null>; put(k: string, v: string, o?: { expirationTtl?: number }): Promise<void> };
+/** The D1 surface the payment marks use (a subset of D1Database). */
+type MarkDB = {
+  prepare(sql: string): { bind(...v: unknown[]): { run(): Promise<{ meta: { changes?: number } }> } };
+};
 
-/** A confirmed tx older than this is never reconciled. */
-export const RECONCILE_WINDOW_SECONDS = 15 * 60;
-/** Settled txids are remembered this long; must exceed the reconcile window. */
-const PAYMENT_MARK_TTL_SECONDS = 60 * 60;
+/** Marks are kept this long (pruned by the cron, see prunePaymentMarks). */
+export const PAYMENT_MARK_RETENTION_SECONDS = 8 * 24 * 60 * 60;
+/** A confirmed tx older than this is never reconciled. Shorter than the mark
+ *  retention, so every payment this gateway settled inside the window still has
+ *  its mark. */
+export const RECONCILE_WINDOW_SECONDS = 7 * 24 * 60 * 60;
+/** Settled payments are marked in D1 from this deploy on; one mined earlier may
+ *  have been served without a durable mark, so it is never reconciled. */
+export const PAYMENT_MARKS_SINCE = Date.parse('2026-11-08T13:30:00Z') / 1000;
 
-const paymentMarkKey = (txid: string) => `paid:${txid.toLowerCase().replace(/^0x/, '')}`;
+const normTxid = (txid: string) => txid.toLowerCase().replace(/^0x/, '');
 
-/** Record a settled payment txid so reconciliation never credits it again. */
-async function markPaymentUsed(kv: MarkKV | undefined, txid: string | undefined): Promise<void> {
-  if (!kv || !txid) return;
-  await kv.put(paymentMarkKey(txid), '1', { expirationTtl: PAYMENT_MARK_TTL_SECONDS });
+/**
+ * Atomically mark a payment txid used. True if this call made the mark, false
+ * if it already existed: the primary key makes a second claim of the same txid
+ * fail, even when two requests race.
+ */
+export async function markPaymentUsed(db: MarkDB, txid: string, now = Date.now()): Promise<boolean> {
+  const r = await db
+    .prepare('INSERT OR IGNORE INTO payment_marks (txid, marked_at) VALUES (?, ?)')
+    .bind(normTxid(txid), new Date(now).toISOString())
+    .run();
+  return (r.meta.changes ?? 0) === 1;
+}
+
+/** Drop marks older than the retention (cron). */
+export async function prunePaymentMarks(db: MarkDB, now = Date.now()): Promise<void> {
+  await db
+    .prepare('DELETE FROM payment_marks WHERE marked_at < ?')
+    .bind(new Date(now - PAYMENT_MARK_RETENTION_SECONDS * 1000).toISOString())
+    .run();
 }
 
 /** Why a confirmed tx doesn't pay `amount` of `tokenType` to `payTo`, or null if it does. */
@@ -222,7 +245,7 @@ interface ReconcileCfg {
 /** Find the tx that used (payer, nonce) and accept it as this request's payment, or explain why not. */
 async function reconcileUsedNonce(
   cfg: ReconcileCfg,
-  kv: MarkKV | undefined,
+  db: MarkDB | undefined,
 ): Promise<{ ok: true; settle: SettlementResponseV2 } | { ok: false; status: 402 | 502; body: Record<string, unknown> }> {
   const refuse = (reason: string, extra: Record<string, unknown> = {}) => ({
     ok: false as const,
@@ -237,7 +260,7 @@ async function reconcileUsedNonce(
       ...extra,
     },
   });
-  if (!kv) return refuse('reconciliation unavailable');
+  if (!db) return refuse('reconciliation unavailable');
   let tx: any;
   try {
     const r = await fetch(`${cfg.apiBase}/extended/v1/tx?from_address=${cfg.payer}&nonce=${cfg.nonce}&limit=1`, { signal: AbortSignal.timeout(3000) });
@@ -251,11 +274,12 @@ async function reconcileUsedNonce(
   if (tx.tx_status !== 'success') return refuse(`tx_status=${tx.tx_status}`, { txid });
   if (tx.canonical === false) return refuse('not canonical', { txid });
   const minedAt = Number(tx.block_time ?? tx.burn_block_time);
-  if (!Number.isFinite(minedAt) || Date.now() / 1000 - minedAt > RECONCILE_WINDOW_SECONDS) return refuse('older than the reconcile window', { txid });
+  if (!Number.isFinite(minedAt) || minedAt < PAYMENT_MARKS_SINCE || Date.now() / 1000 - minedAt > RECONCILE_WINDOW_SECONDS) {
+    return refuse('older than the reconcile window', { txid });
+  }
   const mismatch = paymentMismatch(tx, cfg.tokenType, cfg.network, cfg.payTo, cfg.amount);
   if (mismatch) return refuse(mismatch, { txid });
-  if (await kv.get(paymentMarkKey(txid))) return refuse('already credited to another request', { txid });
-  await markPaymentUsed(kv, txid);
+  if (!(await markPaymentUsed(db, txid))) return refuse('already credited to another request', { txid });
   return { ok: true, settle: { success: true, transaction: txid, network: cfg.networkV2, payer: cfg.payer } };
 }
 
@@ -687,7 +711,7 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     return { retrySelfPaid: true, ...(pin ? { nonce: txInfo.nonce.toString() } : {}), accepts: [selfPaid] };
   };
 
-  const kv = env.PROVIDERS as MarkKV | undefined;
+  const markDb = env.DB as MarkDB | undefined;
   const acceptSettled = (settled: SettlementResponseV2): null => {
     const payerAddress = settled.payer || 'unknown';
     c.set('x402', { payerAddress, settleResult: settled, paymentPayload: payload, paymentRequirements });
@@ -737,7 +761,7 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     if (pending === 'PAYER_NONCE_USED') {
       const rec = await reconcileUsedNonce({
         apiBase, payer: txInfo.origin, nonce: txInfo.nonce, tokenType, network, networkV2, payTo: recipient, amount: config.amount,
-      }, kv);
+      }, markDb);
       if (!rec.ok) return c.json(rec.body, rec.status);
       return acceptSettled(rec.settle);
     }
@@ -774,7 +798,11 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     }, 402);
   }
 
-  await markPaymentUsed(kv, settleResult.transaction);
+  // Mark the settled txid so reconciliation never credits it again. Already
+  // charged at this point, so a mark failure is logged, not refused.
+  if (markDb && settleResult.transaction) {
+    await markPaymentUsed(markDb, settleResult.transaction).catch((e) => console.error('payment mark failed', e));
+  }
   return acceptSettled(settleResult);
 }
 

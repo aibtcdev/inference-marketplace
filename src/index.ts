@@ -6,7 +6,7 @@
 import { Hono } from 'hono';
 import type { Context, Next } from 'hono';
 import { cors } from 'hono/cors';
-import { x402Middleware, x402DynamicMiddleware, issueRetryCredit, RETRY_TOKEN_HEADER, RETRY_CREDIT_TTL_SECONDS } from './x402-middleware';
+import { x402Middleware, x402DynamicMiddleware, issueRetryCredit, prunePaymentMarks, RETRY_TOKEN_HEADER, RETRY_CREDIT_TTL_SECONDS } from './x402-middleware';
 import type { X402Context, TokenType } from './x402-middleware';
 import { proxyChatCompletion } from './upstream';
 import type { ChatCompletionBody } from './upstream';
@@ -772,6 +772,7 @@ async function scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext
       }),
     );
     await directory.expireDownProviders(env.DB);
+    await prunePaymentMarks(env.DB);
   })());
 }
 
