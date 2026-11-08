@@ -259,32 +259,43 @@ app.get('/skill.md', async (c) => {
 // Model catalog. Each entry carries the provider's flat per-request price, in
 // the provider's own token — exactly the amount the 402 will ask for.
 app.get('/v1/models', async (c) => {
-  // Every model is served by a live registered provider. Callable via
-  // /v1/chat/completions (model id) or the explicit /v1/route/:id proxy; payment
-  // settles to the provider directly, in the provider's chosen token. Exclude
-  // flagged, down and unpriced providers, then rank by stake so higher-staked
-  // providers list first (staking buys ranking; it is never required to earn).
-  const liveProviders = (await directory.listProviders(c.env.DB)).filter((p) => p.status !== 'down' && !p.flagged && p.pricePerRequest);
-  const providers = await rankByStake(c.env, liveProviders);
-  const community = [];
+  // One entry per model id, listing only what /v1/chat/completions will route
+  // (directory.isRoutable: live, unflagged, priced). Providers are ranked by stake
+  // (staking buys ranking; it is never required to earn). The top-level
+  // providerId / route / pricePerRequest are the first-ranked provider's;
+  // `providers` lists every provider serving the id, in the same order. Callable
+  // via /v1/chat/completions (model id) or a provider's /v1/route/:id proxy;
+  // payment settles to the provider directly, in the provider's chosen token.
+  const routable = (await directory.listProviders(c.env.DB)).filter(directory.isRoutable);
+  const providers = await rankByStake(c.env, routable);
+  const byId = new Map<string, Record<string, unknown> & { providers: unknown[] }>();
   for (const p of providers) {
     for (const m of p.models) {
-      community.push({
-        id: m.id,
-        name: m.name ?? m.id,
-        contextLength: m.contextLength ?? null,
-        capabilities: m.capabilities ?? [],
+      const offer = {
         providerId: p.id,
-        source: 'community',
         status: p.status,
         acceptedToken: p.acceptedToken,
         route: `/v1/route/${p.id}/chat/completions`,
         pricePerRequest: { amount: p.pricePerRequest, token: p.acceptedToken },
+      };
+      const entry = byId.get(m.id);
+      if (entry) {
+        entry.providers.push(offer);
+        continue;
+      }
+      byId.set(m.id, {
+        id: m.id,
+        name: m.name ?? m.id,
+        contextLength: m.contextLength ?? null,
+        capabilities: m.capabilities ?? [],
+        source: 'community',
+        ...offer,
+        providers: [offer],
       });
     }
   }
 
-  return c.json({ object: 'list', data: community });
+  return c.json({ object: 'list', data: [...byId.values()] });
 });
 
 // Provider directory (supply side) — external providers registered via the UI.
