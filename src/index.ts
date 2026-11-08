@@ -466,24 +466,31 @@ app.post('/v1/providers', async (c) => {
   reg.allowLocal = c.env.ALLOW_LOCAL_ENDPOINTS === 'true'; // dev-only; deployed = https-only
   reg.network = toNetwork(c.env.NETWORK); // payoutAddress must match this network
   reg.payoutAddress = claimedPayout; // the signature-verified owner wins over any manifest value
-  let provider;
+  let prepared: directory.PreparedRegistration;
   try {
-    provider = await directory.registerProvider(c.env.DB, reg);
+    prepared = await directory.prepareRegistration(c.env.DB, reg);
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
   }
 
-  // Gate: verify reachable AND functional before confirming (using the shared
-  // key if the endpoint is secured). Roll back if not.
-  const v = await verifyProvider(provider.endpoint, reg.apiKey);
+  // Gate: verify reachable AND functional before storing (using the shared key
+  // if the endpoint is secured). Nothing is written if it fails, so a failed
+  // re-registration leaves the existing listing as it was.
+  const v = await verifyProvider(prepared.provider.endpoint, reg.apiKey);
   if (!v.ok) {
-    await directory.removeProvider(c.env.DB, provider.id);
     return c.json({ error: v.error, reachable: v.reachable, functional: v.functional }, 400);
   }
+  const provider = await directory.commitRegistration(c.env.DB, prepared);
   const updated = await directory.setHealth(c.env.DB, provider.id, v.health);
+  // Same payout + name + models as an existing listing: that listing moved
+  // endpoints (200, same id) rather than a new one being created (201).
   return c.json(
-    { provider: updated ?? provider, verification: { reachable: true, functional: true, servedModel: v.servedModel, sample: v.sample } },
-    201,
+    {
+      provider: updated ?? provider,
+      ...(prepared.replaces ? { replaced: { id: prepared.replaces.id, previousEndpoint: prepared.replaces.endpoint } } : {}),
+      verification: { reachable: true, functional: true, servedModel: v.servedModel, sample: v.sample },
+    },
+    prepared.replaces ? 200 : 201,
   );
 });
 

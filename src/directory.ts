@@ -210,8 +210,24 @@ async function writeProvider(db: DB, p: Provider): Promise<void> {
     .run();
 }
 
-/** Validate + persist a new provider (status `pending` until first health check). */
-export async function registerProvider(db: DB, input: ProviderInput): Promise<Provider> {
+/** A validated registration, not yet stored. `replaces` is the caller's own
+ *  earlier listing this one moves to a new endpoint (#25). */
+export interface PreparedRegistration {
+  provider: Provider;
+  replaces?: Provider;
+  apiKey?: string;
+}
+
+const modelSet = (models: ModelSpec[]) => models.map((m) => m.id).sort().join('\n');
+
+/**
+ * Validate a registration. A listing with the same payout address, name
+ * (case-insensitive) and model ids is the same provider re-registering from a
+ * new endpoint (e.g. a rotated tunnel URL): it updates that listing in place,
+ * keeping its id, registration time, flag and reputation, instead of adding a
+ * row. The payout-wallet signature on POST /v1/providers authorizes the move.
+ */
+export async function prepareRegistration(db: DB, input: ProviderInput): Promise<PreparedRegistration> {
   const name = (input.name || '').trim();
   const endpoint = (input.endpoint || '').trim().replace(/\/$/, '');
   const payoutAddress = (input.payoutAddress || '').trim();
@@ -232,8 +248,13 @@ export async function registerProvider(db: DB, input: ProviderInput): Promise<Pr
   const dupe = await db.prepare('SELECT id FROM providers WHERE endpoint = ?').bind(endpoint).first();
   if (dupe) throw new Error('this endpoint is already registered');
 
-  const provider: Provider = {
-    id: slugId(name),
+  const { results: mine } = await db
+    .prepare('SELECT * FROM providers WHERE payout_address = ? AND lower(name) = lower(?) ORDER BY registered_at DESC')
+    .bind(payoutAddress, name)
+    .all<ProviderRow>();
+  const existing = (mine ?? []).map(rowToProvider).find((p) => modelSet(p.models) === modelSet(models));
+
+  const fields = {
     name,
     endpoint,
     api,
@@ -241,19 +262,46 @@ export async function registerProvider(db: DB, input: ProviderInput): Promise<Pr
     acceptedToken,
     pricePerRequest,
     models,
-    ...(input.description ? { description: input.description.trim() } : {}),
     secured: Boolean(input.apiKey),
     health: null,
-    status: 'pending',
-    reputation: input.reputationAgentId ? { agentId: input.reputationAgentId } : null,
-    registeredAt: new Date().toISOString(),
+    status: 'pending' as const,
   };
-
-  await writeProvider(db, provider);
-  if (input.apiKey) {
-    await db.prepare('INSERT OR REPLACE INTO provider_keys (id, shared_key) VALUES (?, ?)').bind(provider.id, input.apiKey).run();
+  const description = input.description?.trim();
+  if (existing) {
+    const { description: _old, downSince: _down, ...keep } = existing;
+    return {
+      provider: { ...keep, ...fields, ...(description ? { description } : {}) },
+      replaces: existing,
+      apiKey: input.apiKey,
+    };
   }
-  return provider;
+  return {
+    provider: {
+      id: slugId(name),
+      ...fields,
+      ...(description ? { description } : {}),
+      reputation: input.reputationAgentId ? { agentId: input.reputationAgentId } : null,
+      registeredAt: new Date().toISOString(),
+    },
+    apiKey: input.apiKey,
+  };
+}
+
+/** Store a prepared registration (and its shared key; a moved listing without
+ *  a key drops its old one). */
+export async function commitRegistration(db: DB, reg: PreparedRegistration): Promise<Provider> {
+  await writeProvider(db, reg.provider);
+  if (reg.apiKey) {
+    await db.prepare('INSERT OR REPLACE INTO provider_keys (id, shared_key) VALUES (?, ?)').bind(reg.provider.id, reg.apiKey).run();
+  } else if (reg.replaces) {
+    await db.prepare('DELETE FROM provider_keys WHERE id = ?').bind(reg.provider.id).run();
+  }
+  return reg.provider;
+}
+
+/** Validate + persist a provider (status `pending` until first health check). */
+export async function registerProvider(db: DB, input: ProviderInput): Promise<Provider> {
+  return commitRegistration(db, await prepareRegistration(db, input));
 }
 
 /** The shared secret for a provider (server-side only). */
