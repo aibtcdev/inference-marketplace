@@ -4,11 +4,12 @@
  * One self-describing document an agent (or human) can fetch and act on in a
  * single step: how to (A) pay per request and call inference, and (B) list a
  * model and get paid. Generated from live state (origin, network, the actual
- * catalog + registered providers) so the snippets are always correct and the
- * model ids are real and callable right now.
+ * catalog + registered providers) so the snippets are always correct. Every
+ * model id it names is one the router serves right now (`isRoutable`); when none
+ * is, it says so instead of naming one.
  */
 
-import type { Provider } from './directory';
+import { isRoutable, type Provider } from './directory';
 
 export interface SkillContext {
   origin: string;
@@ -24,20 +25,23 @@ function formatPrice(p: Provider): string {
   return `${v} USDCx`;
 }
 
-/** First callable model id across live providers, for the example snippets. */
-function exampleModelId(providers: Provider[]): string {
+/** A model id the router will actually serve right now, or null if none. */
+function exampleModelId(providers: Provider[]): string | null {
   for (const p of providers) {
-    if (p.status === 'down') continue;
+    if (!isRoutable(p)) continue;
     const m = p.models[0];
     if (m?.id) return m.id;
   }
-  return 'Qwen/Qwen2.5-7B-Instruct';
+  return null;
 }
+
+/** Shown in the worked example when no provider is routable. */
+const NO_LIVE_MODEL = '<model id from GET /v1/models>';
 
 function modelsTable(providers: Provider[]): string {
   const rows: string[] = [];
   for (const p of providers) {
-    if (p.status === 'down' || p.flagged || !p.pricePerRequest) continue;
+    if (!isRoutable(p)) continue;
     for (const m of p.models) {
       const ctx = m.contextLength ? m.contextLength.toLocaleString() : '—';
       rows.push(`| \`${m.id}\` | ${p.id} | ${formatPrice(p)} | ${ctx} | ${p.status} |`);
@@ -53,7 +57,11 @@ function modelsTable(providers: Provider[]): string {
 
 export function renderSkillMd(ctx: SkillContext): string {
   const { origin, network, providers } = ctx;
-  const example = exampleModelId(providers);
+  const liveExample = exampleModelId(providers);
+  const example = liveExample ?? NO_LIVE_MODEL;
+  const availability = liveExample
+    ? 'Every model id below is real and callable right now, at the listed price.'
+    : '**No provider is live right now**, so section A has nothing to call yet: a request returns `400 Unknown model` until one registers. Check `GET /v1/models` first.';
   // Payout address prefix follows the network: ST/SN on testnet, SP/SM on mainnet.
   const walletEx = network === 'mainnet' ? 'SP...' : 'ST...';
   const walletPrefixes = network === 'mainnet' ? '`SP…` / `SM…`' : '`ST…` / `SN…`';
@@ -64,7 +72,7 @@ Pay-per-request AI inference, settled in Bitcoin (**sBTC**) on Stacks via
 **x402**. Non-custodial: clients pay providers directly. This document is
 machine- and human-readable — read it once and you can either **(A) call
 inference and pay per request** or **(B) list your own model and get paid**.
-Every model id below is real and callable right now, at the listed price.
+${availability}
 
 - **Base URL:** \`${origin}\`
 - **Network:** \`${network}\`
