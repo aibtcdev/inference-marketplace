@@ -129,7 +129,10 @@ relay can no longer sponsor, the error carries `retrySelfPaid: true`, self-paid
 self-paid at exactly that nonce. The failed tx may still mine (a timed-out relay
 call or an unclear broadcast leaves its state unknown), and the node accepts only
 one tx per sender nonce, so at most one of the two can confirm. A re-sign at the
-next nonce could confirm alongside it and pay twice.
+next nonce could confirm alongside it and pay twice. While the failed tx is still
+pending, a re-sign at its nonce passes the pending-tx check (it replaces that tx,
+so give it a higher fee). `nonce` is omitted when the relay rejected the nonce
+itself (`SENDER_NONCE_STALE`, `SENDER_NONCE_GAP`); sign at the next nonce then.
 
 **Paid retry.** If the provider fails after payment settled (5xx / timeout), the
 response's `_marketplace.retry.token` lets the client re-send the request to the

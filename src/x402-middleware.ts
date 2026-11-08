@@ -134,19 +134,26 @@ export function decodePaymentTx(txHex: string | undefined, network: 'mainnet' | 
   }
 }
 
+/** Relay sponsor-failure codes meaning the tx's sender nonce itself can't mine. */
+const UNUSABLE_NONCE_CODES = new Set(['SENDER_NONCE_STALE', 'SENDER_NONCE_GAP']);
+
 /**
  * Refuse a self-paid payment while the payer already has a tx in the mempool.
  * A sponsored payment whose response was lost can still be pending; a self-paid
  * retry would take the next nonce and both could confirm (double charge). Same
  * rule as the relay's SponsorWallet.checkSender, and likewise fail closed when
  * the Stacks API can't be read. Returns a reason code, or null when clear.
+ * A tx at the payer's latest pending nonce is allowed: it replaces that pending
+ * tx (the node mines one per sender nonce), which is what a `retrySelfPaid`
+ * re-sign at the pinned nonce does, so it can't pay twice.
  */
-export async function payerPendingCheck(apiBase: string, payer: string): Promise<null | 'PAYER_TX_PENDING' | 'PAYER_NONCE_UNAVAILABLE'> {
+export async function payerPendingCheck(apiBase: string, payer: string, nonce: bigint): Promise<null | 'PAYER_TX_PENDING' | 'PAYER_NONCE_UNAVAILABLE'> {
   try {
     const res = await fetch(`${apiBase}/extended/v1/address/${payer}/nonces`, { signal: AbortSignal.timeout(3000) });
     if (!res.ok) return 'PAYER_NONCE_UNAVAILABLE';
     const n = (await res.json()) as { last_mempool_tx_nonce?: number | null };
-    return n.last_mempool_tx_nonce != null ? 'PAYER_TX_PENDING' : null;
+    if (n.last_mempool_tx_nonce == null || BigInt(n.last_mempool_tx_nonce) === nonce) return null;
+    return 'PAYER_TX_PENDING';
   } catch {
     return 'PAYER_NONCE_UNAVAILABLE';
   }
@@ -540,21 +547,6 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
   const extra = { ...(config.extra ?? {}), ...sponsor };
   if (Object.keys(extra).length) paymentRequirements.extra = extra;
 
-  // A sponsored settle failed. If the relay can no longer sponsor, hand back
-  // self-paid requirements so the client can re-sign in one round trip instead
-  // of waiting out the canSponsor memo.
-  // The failed sponsored tx may still mine: a thrown/timed-out call, and a
-  // BROADCAST_FAILED after a send the node may hold, both leave its state unknown.
-  // So the hint pins `nonce` to the sponsored tx's sender nonce. A self-paid
-  // re-sign at that nonce can never mine alongside it (the node accepts one tx
-  // per sender nonce); one at the next nonce could, charging the payer twice.
-  const sponsorFailureHint = async (nonce: bigint): Promise<Record<string, unknown>> => {
-    resetSponsorStatus();
-    if (await relayCanSponsor(relayUrl)) return {};
-    const selfPaid: PaymentRequirementsV2 = { ...paymentRequirements, extra: { ...(config.extra ?? {}), ...(await selfPaidExtra()) } };
-    return { retrySelfPaid: true, nonce: nonce.toString(), accepts: [selfPaid] };
-  };
-
   const sig = c.req.header(X402_HEADERS.PAYMENT_SIGNATURE);
 
   if (!sig) {
@@ -577,6 +569,24 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     return c.json({ error: 'Invalid payment transaction', code: X402_ERROR_CODES.INVALID_PAYLOAD }, 400);
   }
 
+  // A sponsored settle failed. If the relay can no longer sponsor, hand back
+  // self-paid requirements so the client can re-sign in one round trip instead
+  // of waiting out the canSponsor memo.
+  // The failed sponsored tx may still mine: a thrown/timed-out call, and a
+  // BROADCAST_FAILED after a send the node may hold, both leave its state unknown.
+  // So the hint pins `nonce` to the sponsored tx's sender nonce. A self-paid
+  // re-sign at that nonce can never mine alongside it (the node accepts one tx
+  // per sender nonce); one at the next nonce could, charging the payer twice.
+  // Not pinned when the relay said that nonce itself is unusable (already used,
+  // or past a gap): a re-sign there could never mine.
+  const sponsorFailureHint = async (code?: string): Promise<Record<string, unknown>> => {
+    resetSponsorStatus();
+    if (await relayCanSponsor(relayUrl)) return {};
+    const selfPaid: PaymentRequirementsV2 = { ...paymentRequirements, extra: { ...(config.extra ?? {}), ...(await selfPaidExtra()) } };
+    const pin = !code || !UNUSABLE_NONCE_CODES.has(code);
+    return { retrySelfPaid: true, ...(pin ? { nonce: txInfo.nonce.toString() } : {}), accepts: [selfPaid] };
+  };
+
   let settleResult: SettlementResponseV2;
   if (relay && txInfo.sponsored) {
     // Sponsored tx → the relay co-signs, pays the fee and broadcasts (binding-only;
@@ -595,7 +605,7 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
         error: 'Settlement relay error',
         code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
         details: String(error),
-        ...(await sponsorFailureHint(txInfo.nonce)),
+        ...(await sponsorFailureHint()),
       }, 502);
     }
     if (!sponsored.success) {
@@ -607,14 +617,14 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
         retryable: sponsored.retryable,
         asset: paymentRequirements.asset,
         network: networkV2,
-        ...(await sponsorFailureHint(txInfo.nonce)),
+        ...(await sponsorFailureHint(sponsored.code)),
       }, sponsored.retryable ? 503 : 402);
     }
     settleResult = { success: true, transaction: sponsored.txid, network: networkV2, payer: sponsored.payer };
   } else {
     // Self-paid: the relay broadcasts as-is, so guard against a still-pending
     // earlier payment from this payer (see payerPendingCheck).
-    const pending = await payerPendingCheck(apiBase, txInfo.origin);
+    const pending = await payerPendingCheck(apiBase, txInfo.origin, txInfo.nonce);
     if (pending) {
       return c.json({
         error: pending === 'PAYER_TX_PENDING'
