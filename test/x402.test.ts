@@ -143,6 +143,15 @@ describe('self-paid settlement guard', () => {
     expect(verifierSettle).not.toHaveBeenCalled();
   });
 
+  it('allows a re-sign at the pending nonce (it replaces that tx, so only one can mine)', async () => {
+    net.lastMempoolNonce = 7; // the client builder signs at possible_next_nonce = 7
+    const log: Exchange[] = [];
+    const res = await client(makeApp(), log).post('/paid', {});
+    expect(signedTx(log[1]).nonce).toBe(7n);
+    expect(verifierSettle).toHaveBeenCalledOnce();
+    expect(res.data.txid).toBe('self-tx');
+  });
+
   it('fails closed when the Stacks API cannot be read', async () => {
     const log: Exchange[] = [];
     const api = client(makeApp(), log);
@@ -168,8 +177,33 @@ describe('sponsored settle failure', () => {
     await expect(client(makeApp(), log).post('/paid', {})).rejects.toThrow();
     expect(log[1].status).toBe(503);
     expect(log[1].body.retrySelfPaid).toBe(true);
+    expect(log[1].body.nonce).toBe(signedTx(log[1]).nonce.toString());
     expect(log[1].body.accepts[0].extra.feePayer).toBeUndefined();
     expect(log[1].body.accepts[0].extra.estimatedFeeUstx).toBe(String(SELF_FEE));
+  });
+
+  it('pins the nonce when the relay call throws (broadcast state unknown)', async () => {
+    relay.sponsorPayment.mockImplementation(async () => {
+      net.canSponsor = false;
+      throw new Error('rpc timeout');
+    });
+    const log: Exchange[] = [];
+    await expect(client(makeApp(), log).post('/paid', {})).rejects.toThrow();
+    expect(log[1].status).toBe(502);
+    expect(log[1].body.retrySelfPaid).toBe(true);
+    expect(log[1].body.nonce).toBe(signedTx(log[1]).nonce.toString());
+  });
+
+  it('omits the nonce when the relay says that nonce cannot mine', async () => {
+    relay.sponsorPayment.mockImplementation(async () => {
+      net.canSponsor = false;
+      return { success: false, code: 'SENDER_NONCE_STALE', error: 'nonce already used', retryable: false };
+    });
+    const log: Exchange[] = [];
+    await expect(client(makeApp(), log).post('/paid', {})).rejects.toThrow();
+    expect(log[1].status).toBe(402);
+    expect(log[1].body.retrySelfPaid).toBe(true);
+    expect(log[1].body.nonce).toBeUndefined();
   });
 
   it('no self-pay hint while the relay still reports canSponsor', async () => {
@@ -177,6 +211,7 @@ describe('sponsored settle failure', () => {
     const log: Exchange[] = [];
     await expect(client(makeApp(), log).post('/paid', {})).rejects.toThrow();
     expect(log[1].body.retrySelfPaid).toBeUndefined();
+    expect(log[1].body.nonce).toBeUndefined();
   });
 });
 
