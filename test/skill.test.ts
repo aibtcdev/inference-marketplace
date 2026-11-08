@@ -49,6 +49,9 @@ describe('skill.md worked example', () => {
     expect(md).toContain('<model id from GET /v1/models>');
     expect(md).toContain('No provider is live right now');
     expect(md).not.toContain('real and callable right now');
+    // The models table agrees with the banner: no unroutable rows.
+    expect(md).not.toContain('| `live/model` |');
+    expect(md).toContain('no live providers yet');
   });
 
   it('skips an unroutable provider and picks the next routable one', () => {
@@ -58,5 +61,7 @@ describe('skill.md worked example', () => {
     ]);
     expect(md).toContain('"model":"live/model"');
     expect(md).not.toContain('"model":"degraded/model"');
+    expect(md).toContain('| `live/model` | b |');
+    expect(md).not.toContain('`degraded/model`');
   });
 });

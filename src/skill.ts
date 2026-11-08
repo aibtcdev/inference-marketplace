@@ -4,8 +4,9 @@
  * One self-describing document an agent (or human) can fetch and act on in a
  * single step: how to (A) pay per request and call inference, and (B) list a
  * model and get paid. Generated from live state (origin, network, the actual
- * catalog + registered providers) so the snippets are always correct and the
- * model ids are real and callable right now.
+ * catalog + registered providers) so the snippets are always correct. Every
+ * model id it names is one the router serves right now (`isRoutable`); when none
+ * is, it says so instead of naming one.
  */
 
 import { isRoutable, type Provider } from './directory';
@@ -24,7 +25,6 @@ function formatPrice(p: Provider): string {
   return `${v} USDCx`;
 }
 
-/** First callable model id across live providers, for the example snippets. */
 /** A model id the router will actually serve right now, or null if none. */
 function exampleModelId(providers: Provider[]): string | null {
   for (const p of providers) {
@@ -41,7 +41,7 @@ const NO_LIVE_MODEL = '<model id from GET /v1/models>';
 function modelsTable(providers: Provider[]): string {
   const rows: string[] = [];
   for (const p of providers) {
-    if (p.status === 'down' || p.flagged || !p.pricePerRequest) continue;
+    if (!isRoutable(p)) continue;
     for (const m of p.models) {
       const ctx = m.contextLength ? m.contextLength.toLocaleString() : '—';
       rows.push(`| \`${m.id}\` | ${p.id} | ${formatPrice(p)} | ${ctx} | ${p.status} |`);
