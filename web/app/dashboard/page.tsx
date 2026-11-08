@@ -17,7 +17,7 @@ export default function Dashboard() {
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(`${GATEWAY}/v1/providers`);
+      const r = await fetch(`${GATEWAY}/v1/providers?include=stale`);
       const d = await r.json();
       setProviders(d.data || []);
     } catch { /* offline */ }

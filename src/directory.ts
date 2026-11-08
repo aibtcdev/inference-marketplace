@@ -48,6 +48,8 @@ export interface Provider {
   flagReason?: string;
   /** ERC-8004 reputation (Phase 3). null until it has feedback. */
   reputation: { agentId: number; score?: number } | null;
+  /** ISO time of the first failed check in the current outage; absent unless down. */
+  downSince?: string;
   registeredAt: string;
 }
 
@@ -151,6 +153,7 @@ interface ProviderRow {
   models: string;
   reputation: string | null;
   registered_at: string;
+  down_since?: string | null;
 }
 
 function rowToProvider(r: ProviderRow): Provider {
@@ -171,6 +174,7 @@ function rowToProvider(r: ProviderRow): Provider {
     ...(r.flag_reason ? { flagReason: r.flag_reason } : {}),
     reputation: r.reputation ? (JSON.parse(r.reputation) as Provider['reputation']) : null,
     registeredAt: r.registered_at,
+    ...(r.down_since ? { downSince: r.down_since } : {}),
   };
 }
 
@@ -194,7 +198,8 @@ async function writeProvider(db: DB, p: Provider): Promise<void> {
          name=excluded.name, endpoint=excluded.endpoint, api=excluded.api, payout_address=excluded.payout_address,
          accepted_token=excluded.accepted_token, price_per_request=excluded.price_per_request, description=excluded.description, secured=excluded.secured,
          status=excluded.status, flagged=excluded.flagged,
-         flag_reason=excluded.flag_reason, health=excluded.health, models=excluded.models, reputation=excluded.reputation`,
+         flag_reason=excluded.flag_reason, health=excluded.health, models=excluded.models, reputation=excluded.reputation,
+         down_since=CASE WHEN excluded.status = 'down' THEN providers.down_since ELSE NULL END`,
     )
     .bind(
       p.id, p.name, p.endpoint, p.api, p.payoutAddress, p.acceptedToken, p.pricePerRequest, p.description ?? null,
@@ -393,10 +398,15 @@ export async function commitUpdate(db: DB, provider: Provider, newKey?: string):
 }
 
 /** Update a provider's health snapshot + derived status. */
-export async function setHealth(db: DB, id: string, health: HealthResult): Promise<Provider | undefined> {
+export async function setHealth(db: DB, id: string, health: HealthResult, now = new Date()): Promise<Provider | undefined> {
+  // down_since keeps the first failure of the current outage; any good check clears it.
   const res = await db
-    .prepare('UPDATE providers SET health = ?, status = ? WHERE id = ?')
-    .bind(JSON.stringify(health), health.status, id)
+    .prepare(
+      `UPDATE providers SET health = ?, status = ?,
+         down_since = CASE WHEN ? = 'down' THEN COALESCE(down_since, ?) ELSE NULL END
+       WHERE id = ?`,
+    )
+    .bind(JSON.stringify(health), health.status, health.status, now.toISOString(), id)
     .run();
   if (!res.meta.changes) return undefined;
   return getProvider(db, id);
@@ -419,6 +429,29 @@ export async function setFlag(db: DB, id: string, flagged: boolean, reason?: str
     .run();
   if (!res.meta.changes) return undefined;
   return getProvider(db, id);
+}
+
+/** Hidden from the default /v1/providers listing after this long down (#28). */
+export const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+/** Deleted by the cron after this long down (#28). */
+export const EXPIRE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Down for longer than STALE_AFTER_MS. */
+export function isStale(p: Provider, now = Date.now()): boolean {
+  return !!p.downSince && now - Date.parse(p.downSince) > STALE_AFTER_MS;
+}
+
+/** Delete providers (and their shared keys) down for longer than EXPIRE_AFTER_MS.
+ *  Returns the removed ids. */
+export async function expireDownProviders(db: DB, now = Date.now()): Promise<string[]> {
+  const cutoff = new Date(now - EXPIRE_AFTER_MS).toISOString();
+  const { results } = await db
+    .prepare("SELECT id FROM providers WHERE status = 'down' AND down_since IS NOT NULL AND down_since < ?")
+    .bind(cutoff)
+    .all<{ id: string }>();
+  const ids = (results ?? []).map((r) => r.id);
+  for (const id of ids) await removeProvider(db, id);
+  return ids;
 }
 
 export async function removeProvider(db: DB, id: string): Promise<boolean> {

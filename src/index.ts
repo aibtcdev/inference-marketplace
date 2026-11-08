@@ -288,8 +288,11 @@ app.get('/v1/models', async (c) => {
 });
 
 // Provider directory (supply side) — external providers registered via the UI.
+// Listings down for more than 24h are hidden unless ?include=stale; the cron
+// deletes them after 7 days (#28).
 app.get('/v1/providers', async (c) => {
-  const data = await directory.listProviders(c.env.DB);
+  const all = await directory.listProviders(c.env.DB);
+  const data = c.req.query('include') === 'stale' ? all : all.filter((p) => !directory.isStale(p));
   return c.json({ object: 'list', data });
 });
 
@@ -749,6 +752,7 @@ async function scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext
         await directory.setHealth(env.DB, p.id, health);
       }),
     );
+    await directory.expireDownProviders(env.DB);
   })());
 }
 

@@ -26,7 +26,11 @@ CREATE TABLE IF NOT EXISTS providers (
   health        TEXT,          -- JSON HealthResult, null until first check
   models        TEXT NOT NULL, -- JSON array of ModelSpec
   reputation    TEXT,          -- JSON { agentId, score? }, null until feedback
-  registered_at TEXT NOT NULL
+  registered_at TEXT NOT NULL,
+  -- ISO time of the first failed check in the current outage; NULL unless down.
+  -- Hidden from /v1/providers after 24h, deleted after 7 days. Existing DBs:
+  --   ALTER TABLE providers ADD COLUMN down_since TEXT;
+  down_since    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_providers_payout ON providers(payout_address);
