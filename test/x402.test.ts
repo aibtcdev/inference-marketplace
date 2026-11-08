@@ -24,7 +24,7 @@ const FEE_PAYER = 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM';
 const SELF_FEE = 499;
 
 /** Mutable network state the stubbed fetch answers from. */
-const net = { canSponsor: true, lastMempoolNonce: null as number | null, hiroUp: true, noEstimate: false };
+const net = { canSponsor: true, lastMempoolNonce: null as number | null, lastExecutedNonce: 6, hiroUp: true, noEstimate: false, usedTx: null as any };
 
 function stubFetch() {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -32,7 +32,10 @@ function stubFetch() {
     if (url.endsWith('/status/sponsor')) return Response.json({ canSponsor: net.canSponsor });
     if (!net.hiroUp) return new Response('down', { status: 503 });
     if (url.includes('/nonces')) {
-      return Response.json({ possible_next_nonce: 7, last_mempool_tx_nonce: net.lastMempoolNonce, last_executed_tx_nonce: 6 });
+      return Response.json({ possible_next_nonce: 7, last_mempool_tx_nonce: net.lastMempoolNonce, last_executed_tx_nonce: net.lastExecutedNonce });
+    }
+    if (url.includes('/extended/v1/tx?from_address=')) {
+      return Response.json({ results: net.usedTx ? [net.usedTx] : [] });
     }
     if (url.includes('/v2/fees/transaction')) {
       if (net.noEstimate) return Response.json({ error: 'Estimation could not be performed', reason: 'NoEstimateAvailable' }, { status: 400 });
@@ -51,12 +54,15 @@ function makeApp() {
 }
 
 const relay = { sponsorPayment: vi.fn() };
+const kvStore = new Map<string, string>();
+const kv = { get: async (k: string) => kvStore.get(k) ?? null, put: async (k: string, v: string) => void kvStore.set(k, v) };
 const env = {
   NETWORK: 'testnet',
   RELAY_URL: 'https://relay.test',
   STACKS_API: 'https://hiro.test',
   X402_SPONSOR_FEE_PAYER: FEE_PAYER,
   X402_RELAY: relay,
+  PROVIDERS: kv,
 };
 
 /** Every request the client sends, with the response the gateway gave it. */
@@ -84,7 +90,8 @@ function signedTx(ex: Exchange) {
 }
 
 beforeEach(() => {
-  Object.assign(net, { canSponsor: true, lastMempoolNonce: null, hiroUp: true, noEstimate: false });
+  Object.assign(net, { canSponsor: true, lastMempoolNonce: null, lastExecutedNonce: 6, hiroUp: true, noEstimate: false, usedTx: null });
+  kvStore.clear();
   resetSponsorStatus();
   relay.sponsorPayment.mockReset().mockResolvedValue({ success: true, txid: 'sponsored-tx', payer: 'payer', fee: '0' });
   verifierSettle.mockReset().mockResolvedValue({ success: true, transaction: 'self-tx', network: 'stacks:2147483648', payer: 'payer' });
@@ -163,6 +170,67 @@ describe('self-paid settlement guard', () => {
     await expect(api.post('/paid', {})).rejects.toThrow();
     expect(log[1].status).toBe(503);
     expect(log[1].body).toMatchObject({ reason: 'PAYER_NONCE_UNAVAILABLE', retryable: true });
+    expect(verifierSettle).not.toHaveBeenCalled();
+  });
+});
+
+describe('used-nonce reconciliation (#43)', () => {
+  const SBTC = 'ST1F7QA2MDF17S807EPA36TSS8AMEFY4KA9TVGWXT.sbtc-token';
+  // The client signs at possible_next_nonce = 7; nonce 7 already confirmed.
+  const minedTx = (payer: string, over: Record<string, unknown> = {}) => ({
+    tx_id: '0xabc', sender_address: payer, nonce: 7, tx_status: 'success', canonical: true,
+    block_time: Math.floor(Date.now() / 1000) - 30, tx_type: 'contract_call',
+    contract_call: {
+      contract_id: SBTC, function_name: 'transfer',
+      function_args: [{ name: 'amount', repr: 'u1' }, { name: 'sender', repr: `'${payer}` }, { name: 'recipient', repr: `'${PAY_TO}` }],
+    },
+    ...over,
+  });
+  beforeEach(() => { net.canSponsor = false; net.lastExecutedNonce = 7; });
+
+  /** Runs one paid request; the mined tx is built from the signing payer. */
+  async function pay(over: Record<string, unknown> = {}) {
+    const log: Exchange[] = [];
+    const api = client(makeApp(), log);
+    api.interceptors.request.use((cfg) => {
+      const sig = (cfg.headers as any)?.['payment-signature'];
+      if (sig) net.usedTx = minedTx(decodePaymentTx(JSON.parse(atob(sig)).payload.transaction, 'testnet')!.origin, over);
+      return cfg;
+    });
+    const res = await api.post('/paid', {}).catch((e: AxiosError) => e.response!);
+    return { res, log };
+  }
+
+  it('accepts the confirmed payment that used the nonce, once', async () => {
+    const first = await pay();
+    expect(first.res.status).toBe(200);
+    expect(first.res.data.txid).toBe('0xabc');
+    expect(verifierSettle).not.toHaveBeenCalled();
+    const again = await pay();
+    expect(again.res.status).toBe(402);
+    expect(again.res.data).toMatchObject({ reason: 'PAYER_NONCE_USED', detail: 'already credited to another request' });
+  });
+
+  it('never credits a tx this gateway already settled', async () => {
+    net.lastExecutedNonce = 6;
+    verifierSettle.mockResolvedValue({ success: true, transaction: '0xABC', network: 'stacks:2147483648', payer: 'payer' });
+    expect((await pay()).res.status).toBe(200); // normal settle marks the txid
+    net.lastExecutedNonce = 7;
+    const claim = await pay();
+    expect(claim.res.status).toBe(402);
+    expect(claim.res.data.detail).toBe('already credited to another request');
+  });
+
+  it.each([
+    ['failed tx', { tx_status: 'abort_by_response' }, 'tx_status=abort_by_response'],
+    ['underpaid', { contract_call: { contract_id: SBTC, function_name: 'transfer', function_args: [{ name: 'amount', repr: 'u0' }, { repr: "'x" }, { name: 'recipient', repr: `'${PAY_TO}` }] } }, 'underpaid'],
+    ['wrong recipient', { contract_call: { contract_id: SBTC, function_name: 'transfer', function_args: [{ name: 'amount', repr: 'u1' }, { repr: "'x" }, { name: 'recipient', repr: "'ST000000000000000000002AMW42H" }] } }, 'wrong recipient'],
+    ['wrong token', { contract_call: { contract_id: 'ST1.other', function_name: 'transfer', function_args: [] } }, 'wrong token'],
+    ['too old', { block_time: Math.floor(Date.now() / 1000) - 3600 }, 'older than the reconcile window'],
+  ])('refuses a %s', async (_l, over, detail) => {
+    const { res } = await pay(over);
+    expect(res.status).toBe(402);
+    expect(res.data).toMatchObject({ reason: 'PAYER_NONCE_USED', detail });
     expect(verifierSettle).not.toHaveBeenCalled();
   });
 });
