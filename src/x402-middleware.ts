@@ -146,17 +146,117 @@ const UNUSABLE_NONCE_CODES = new Set(['SENDER_NONCE_STALE', 'SENDER_NONCE_GAP'])
  * A tx at the payer's latest pending nonce is allowed: it replaces that pending
  * tx (the node mines one per sender nonce), which is what a `retrySelfPaid`
  * re-sign at the pinned nonce does, so it can't pay twice.
+ * `PAYER_NONCE_USED`: the tx's nonce already confirmed, so it can never mine;
+ * the caller can reconcile against the tx that used it (#43).
  */
-export async function payerPendingCheck(apiBase: string, payer: string, nonce: bigint): Promise<null | 'PAYER_TX_PENDING' | 'PAYER_NONCE_UNAVAILABLE'> {
+export async function payerPendingCheck(
+  apiBase: string,
+  payer: string,
+  nonce: bigint,
+): Promise<null | 'PAYER_TX_PENDING' | 'PAYER_NONCE_UNAVAILABLE' | 'PAYER_NONCE_USED'> {
   try {
     const res = await fetch(`${apiBase}/extended/v1/address/${payer}/nonces`, { signal: AbortSignal.timeout(3000) });
     if (!res.ok) return 'PAYER_NONCE_UNAVAILABLE';
-    const n = (await res.json()) as { last_mempool_tx_nonce?: number | null };
+    const n = (await res.json()) as { last_mempool_tx_nonce?: number | null; last_executed_tx_nonce?: number | null };
+    if (n.last_executed_tx_nonce != null && nonce <= BigInt(n.last_executed_tx_nonce)) return 'PAYER_NONCE_USED';
     if (n.last_mempool_tx_nonce == null || BigInt(n.last_mempool_tx_nonce) === nonce) return null;
     return 'PAYER_TX_PENDING';
   } catch {
     return 'PAYER_NONCE_UNAVAILABLE';
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Used-nonce reconciliation (#43). A sponsored settle can fail ambiguously and
+// still mine; the client then re-signs self-paid at the same nonce (the
+// retrySelfPaid hint), which the node rejects. Instead of failing a buyer who
+// has paid once, accept the confirmed tx that used (payer, nonce) when it is a
+// recent, successful, full payment to payTo that no request has used yet.
+// ─────────────────────────────────────────────────────────────────────────
+
+type MarkKV = { get(k: string): Promise<string | null>; put(k: string, v: string, o?: { expirationTtl?: number }): Promise<void> };
+
+/** A confirmed tx older than this is never reconciled. */
+export const RECONCILE_WINDOW_SECONDS = 15 * 60;
+/** Settled txids are remembered this long; must exceed the reconcile window. */
+const PAYMENT_MARK_TTL_SECONDS = 60 * 60;
+
+const paymentMarkKey = (txid: string) => `paid:${txid.toLowerCase().replace(/^0x/, '')}`;
+
+/** Record a settled payment txid so reconciliation never credits it again. */
+async function markPaymentUsed(kv: MarkKV | undefined, txid: string | undefined): Promise<void> {
+  if (!kv || !txid) return;
+  await kv.put(paymentMarkKey(txid), '1', { expirationTtl: PAYMENT_MARK_TTL_SECONDS });
+}
+
+/** Why a confirmed tx doesn't pay `amount` of `tokenType` to `payTo`, or null if it does. */
+export function paymentMismatch(tx: any, tokenType: TokenType, network: 'mainnet' | 'testnet', payTo: string, amount: string): string | null {
+  const want = BigInt(amount);
+  if (tokenType === 'STX') {
+    if (tx.tx_type !== 'token_transfer') return `tx_type=${tx.tx_type}`;
+    if (tx.token_transfer?.recipient_address !== payTo) return 'wrong recipient';
+    const got = BigInt(tx.token_transfer?.amount ?? '0');
+    return got < want ? 'underpaid' : null;
+  }
+  if (tx.tx_type !== 'contract_call') return `tx_type=${tx.tx_type}`;
+  const call = tx.contract_call ?? {};
+  if (call.contract_id !== getAssetV2(tokenType, network)) return 'wrong token';
+  if (call.function_name !== 'transfer') return 'wrong function';
+  const args = call.function_args as any[] | undefined;
+  const got = uintRepr(findArg(args, 'amount', 0)?.repr);
+  if (principalRepr(findArg(args, 'recipient', 2)?.repr) !== payTo) return 'wrong recipient';
+  return got === null || got < want ? 'underpaid' : null;
+}
+
+interface ReconcileCfg {
+  apiBase: string;
+  payer: string;
+  nonce: bigint;
+  tokenType: TokenType;
+  network: 'mainnet' | 'testnet';
+  networkV2: SettlementResponseV2['network'];
+  payTo: string;
+  amount: string;
+}
+
+/** Find the tx that used (payer, nonce) and accept it as this request's payment, or explain why not. */
+async function reconcileUsedNonce(
+  cfg: ReconcileCfg,
+  kv: MarkKV | undefined,
+): Promise<{ ok: true; settle: SettlementResponseV2 } | { ok: false; status: 402 | 502; body: Record<string, unknown> }> {
+  const refuse = (reason: string, extra: Record<string, unknown> = {}) => ({
+    ok: false as const,
+    status: 402 as const,
+    body: {
+      error: 'Payment nonce already used and the tx that used it is not a payment this request can claim; sign at the next nonce',
+      code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+      reason: 'PAYER_NONCE_USED',
+      detail: reason,
+      payer: cfg.payer,
+      nonce: cfg.nonce.toString(),
+      ...extra,
+    },
+  });
+  if (!kv) return refuse('reconciliation unavailable');
+  let tx: any;
+  try {
+    const r = await fetch(`${cfg.apiBase}/extended/v1/tx?from_address=${cfg.payer}&nonce=${cfg.nonce}&limit=1`, { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return { ok: false, status: 502, body: { error: 'Stacks API lookup failed', code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, reason: 'PAYER_NONCE_UNAVAILABLE', retryable: true } };
+    tx = ((await r.json()) as { results?: any[] }).results?.find((t) => t?.sender_address === cfg.payer && BigInt(t?.nonce ?? -1) === cfg.nonce);
+  } catch (e) {
+    return { ok: false, status: 502, body: { error: 'Stacks API lookup failed', code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR, reason: 'PAYER_NONCE_UNAVAILABLE', retryable: true, details: String(e) } };
+  }
+  if (!tx) return refuse('no confirmed tx found at that nonce');
+  const txid = String(tx.tx_id);
+  if (tx.tx_status !== 'success') return refuse(`tx_status=${tx.tx_status}`, { txid });
+  if (tx.canonical === false) return refuse('not canonical', { txid });
+  const minedAt = Number(tx.block_time ?? tx.burn_block_time);
+  if (!Number.isFinite(minedAt) || Date.now() / 1000 - minedAt > RECONCILE_WINDOW_SECONDS) return refuse('older than the reconcile window', { txid });
+  const mismatch = paymentMismatch(tx, cfg.tokenType, cfg.network, cfg.payTo, cfg.amount);
+  if (mismatch) return refuse(mismatch, { txid });
+  if (await kv.get(paymentMarkKey(txid))) return refuse('already credited to another request', { txid });
+  await markPaymentUsed(kv, txid);
+  return { ok: true, settle: { success: true, transaction: txid, network: cfg.networkV2, payer: cfg.payer } };
 }
 
 /** Self-paid fee estimate (uSTX) for the payment tx, memoized per isolate. */
@@ -587,6 +687,15 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     return { retrySelfPaid: true, ...(pin ? { nonce: txInfo.nonce.toString() } : {}), accepts: [selfPaid] };
   };
 
+  const kv = env.PROVIDERS as MarkKV | undefined;
+  const acceptSettled = (settled: SettlementResponseV2): null => {
+    const payerAddress = settled.payer || 'unknown';
+    c.set('x402', { payerAddress, settleResult: settled, paymentPayload: payload, paymentRequirements });
+    c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeB64Json(settled));
+    c.header('X-PAYER-ADDRESS', payerAddress);
+    return null;
+  };
+
   let settleResult: SettlementResponseV2;
   if (relay && txInfo.sponsored) {
     // Sponsored tx → the relay co-signs, pays the fee and broadcasts (binding-only;
@@ -625,6 +734,13 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     // Self-paid: the relay broadcasts as-is, so guard against a still-pending
     // earlier payment from this payer (see payerPendingCheck).
     const pending = await payerPendingCheck(apiBase, txInfo.origin, txInfo.nonce);
+    if (pending === 'PAYER_NONCE_USED') {
+      const rec = await reconcileUsedNonce({
+        apiBase, payer: txInfo.origin, nonce: txInfo.nonce, tokenType, network, networkV2, payTo: recipient, amount: config.amount,
+      }, kv);
+      if (!rec.ok) return c.json(rec.body, rec.status);
+      return acceptSettled(rec.settle);
+    }
     if (pending) {
       return c.json({
         error: pending === 'PAYER_TX_PENDING'
@@ -658,11 +774,8 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     }, 402);
   }
 
-  const payerAddress = settleResult.payer || 'unknown';
-  c.set('x402', { payerAddress, settleResult, paymentPayload: payload, paymentRequirements });
-  c.header(X402_HEADERS.PAYMENT_RESPONSE, encodeB64Json(settleResult));
-  c.header('X-PAYER-ADDRESS', payerAddress);
-  return null;
+  await markPaymentUsed(kv, settleResult.transaction);
+  return acceptSettled(settleResult);
 }
 
 /** Fixed-price x402 middleware (token overridable via header/query). */
