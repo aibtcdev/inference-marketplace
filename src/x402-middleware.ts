@@ -211,6 +211,28 @@ export async function markPaymentUsed(db: MarkDB, txid: string, now = Date.now()
   return (r.meta.changes ?? 0) === 1;
 }
 
+/** Delays before each retry of a failed settle-time mark write. */
+export const MARK_RETRY_DELAYS_MS = [50, 250];
+
+/**
+ * markPaymentUsed for a payment that has already settled, retried on transient
+ * D1 errors. Returns markPaymentUsed's answer, or null when every attempt threw
+ * (logged with the txid so the unmarked payment can be found).
+ */
+async function markSettledPayment(db: MarkDB, txid: string, payer: string): Promise<boolean | null> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await markPaymentUsed(db, txid);
+    } catch (e) {
+      if (attempt >= MARK_RETRY_DELAYS_MS.length) {
+        console.error('payment mark failed', { txid, payer, attempts: attempt + 1, error: String(e) });
+        return null;
+      }
+      await new Promise((r) => setTimeout(r, MARK_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+}
+
 /** Drop marks older than the retention (cron). */
 export async function prunePaymentMarks(db: MarkDB, now = Date.now()): Promise<void> {
   await db
@@ -808,15 +830,12 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
   // Mark the settled txid so reconciliation never credits it again. A mark that
   // already exists means another request was served for this txid (reconciled
   // while a slow settle was in flight, or the same tx resubmitted): refuse.
-  // Already charged at this point, so a mark write failure is logged, not refused.
+  // Already charged at this point, so a write that still fails after retries is
+  // logged and served: without the mark the payer could reconcile this txid once
+  // more, which beats charging them for nothing.
   if (markDb && settleResult.transaction) {
-    let fresh = true;
-    try {
-      fresh = await markPaymentUsed(markDb, settleResult.transaction);
-    } catch (e) {
-      console.error('payment mark failed', e);
-    }
-    if (!fresh) {
+    const fresh = await markSettledPayment(markDb, settleResult.transaction, txInfo.origin);
+    if (fresh === false) {
       return c.json({
         error: 'Payment already used by another request',
         code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
