@@ -16,7 +16,7 @@ vi.mock('x402-stacks', async (orig) => ({
 }));
 
 const { wrapAxiosWithPayment, privateKeyToAccount } = await import('x402-stacks');
-const { x402Middleware, decodePaymentTx, resetSponsorStatus, issueRetryCredit, RETRY_CREDIT_MAX_ATTEMPTS, markPaymentUsed, PAYMENT_MARKS_SINCE } = await import('../src/x402-middleware');
+const { x402Middleware, decodePaymentTx, resetSponsorStatus, issueRetryCredit, RETRY_CREDIT_MAX_ATTEMPTS, markPaymentUsed, PAYMENT_MARKS_SINCE, MARK_RETRY_DELAYS_MS } = await import('../src/x402-middleware');
 const { makeD1 } = await import('./d1');
 const { proxyChatCompletion } = await import('../src/upstream');
 
@@ -264,6 +264,39 @@ describe('used-nonce reconciliation (#43)', () => {
     const late = await pay(); // slow settle of the same tx returns afterwards
     expect(late.res.status).toBe(409);
     expect(late.res.data.reason).toBe('PAYMENT_ALREADY_USED');
+  });
+
+  /** Make the next `n` payment_marks statements throw. */
+  function failMarks(n: number) {
+    const real = db.prepare.bind(db);
+    (db as any).prepare = (sql: string) => {
+      if (n > 0 && sql.includes('payment_marks')) { n--; throw new Error('D1 unavailable'); }
+      return real(sql);
+    };
+  }
+  async function settleThenReconcile() {
+    net.lastExecutedNonce = 6;
+    verifierSettle.mockResolvedValue({ success: true, transaction: '0xABC', network: 'stacks:2147483648', payer: 'payer' });
+    const settled = await pay();
+    net.lastExecutedNonce = 7; // the settled tx mined
+    return { settled, claim: await pay() };
+  }
+
+  it('retries a failed settle-time mark, so the txid cannot be reconciled again', async () => {
+    failMarks(MARK_RETRY_DELAYS_MS.length);
+    const { settled, claim } = await settleThenReconcile();
+    expect(settled.res.status).toBe(200);
+    expect(claim.res.status).toBe(402);
+    expect(claim.res.data.detail).toBe('already credited to another request');
+  });
+
+  it('still serves a settled payment when every mark attempt fails, and logs the txid', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    failMarks(MARK_RETRY_DELAYS_MS.length + 1);
+    const { settled } = await settleThenReconcile();
+    expect(settled.res.status).toBe(200);
+    expect(err).toHaveBeenCalledWith('payment mark failed', expect.objectContaining({ txid: '0xABC', attempts: MARK_RETRY_DELAYS_MS.length + 1 }));
+    err.mockRestore();
   });
 
   it('two concurrent claims of one payment: exactly one is served', async () => {
