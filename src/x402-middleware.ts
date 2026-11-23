@@ -126,6 +126,10 @@ export function decodePaymentTx(txHex: string | undefined, network: 'mainnet' | 
   if (!txHex) return null;
   try {
     const tx = deserializeTransaction(txHex.replace(/^0x/, ''));
+    // The origin is the payer every later check trusts (reconciliation credits
+    // its confirmed txs), so it must be proven by the signature, not just read
+    // from the signer field. Throws on a bad or missing origin signature.
+    tx.verifyOrigin();
     const sc = tx.auth.spendingCondition;
     const origin = addressToString(addressFromVersionHash(addressHashModeToVersion(sc.hashMode, network), sc.signer));
     return { sponsored: tx.auth.authType === AuthType.Sponsored, origin, nonce: BigInt(sc.nonce), fee: BigInt(sc.fee) };
@@ -179,8 +183,11 @@ type MarkDB = {
   prepare(sql: string): { bind(...v: unknown[]): { run(): Promise<{ meta: { changes?: number } }> } };
 };
 
-/** Marks are kept this long (pruned by the cron, see prunePaymentMarks). */
-export const PAYMENT_MARK_RETENTION_SECONDS = 8 * 24 * 60 * 60;
+/** Marks are kept this long (pruned by the cron, see prunePaymentMarks). A mark
+ *  is written at settle time but the reconcile window counts from mining, so
+ *  the margin over RECONCILE_WINDOW_SECONDS must cover the longest a settled tx
+ *  can sit unconfirmed; 30 days is far past the node's mempool expiry. */
+export const PAYMENT_MARK_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 /** A confirmed tx older than this is never reconciled. Shorter than the mark
  *  retention, so every payment this gateway settled inside the window still has
  *  its mark. */
@@ -798,10 +805,25 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     }, 402);
   }
 
-  // Mark the settled txid so reconciliation never credits it again. Already
-  // charged at this point, so a mark failure is logged, not refused.
+  // Mark the settled txid so reconciliation never credits it again. A mark that
+  // already exists means another request was served for this txid (reconciled
+  // while a slow settle was in flight, or the same tx resubmitted): refuse.
+  // Already charged at this point, so a mark write failure is logged, not refused.
   if (markDb && settleResult.transaction) {
-    await markPaymentUsed(markDb, settleResult.transaction).catch((e) => console.error('payment mark failed', e));
+    let fresh = true;
+    try {
+      fresh = await markPaymentUsed(markDb, settleResult.transaction);
+    } catch (e) {
+      console.error('payment mark failed', e);
+    }
+    if (!fresh) {
+      return c.json({
+        error: 'Payment already used by another request',
+        code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+        reason: 'PAYMENT_ALREADY_USED',
+        txid: settleResult.transaction,
+      }, 409);
+    }
   }
   return acceptSettled(settleResult);
 }

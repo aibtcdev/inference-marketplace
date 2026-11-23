@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Hono } from 'hono';
 import axios, { AxiosError, type AxiosAdapter } from 'axios';
-import { randomPrivateKey } from '@stacks/transactions';
+import { randomPrivateKey, deserializeTransaction, createAddress } from '@stacks/transactions';
 
 const verifierSettle = vi.fn();
 vi.mock('x402-stacks', async (orig) => ({
@@ -234,6 +234,36 @@ describe('used-nonce reconciliation (#43)', () => {
   it('accepts a payment mined days ago (inside the window)', async () => {
     const { res } = await pay({ block_time: NOW / 1000 - 3 * 24 * 3600 });
     expect(res.status).toBe(200);
+  });
+
+  it('refuses a tx whose signer field names another address (forged origin)', async () => {
+    const victim = 'ST3NBRSFKX28FQ2ZJ1MAKX58HKHSDGNV5N7R21XCP';
+    net.usedTx = minedTx(victim); // the victim's unrelated transfer to PAY_TO
+    const log: Exchange[] = [];
+    const api = client(makeApp(), log);
+    api.interceptors.request.use((cfg) => {
+      const sig = (cfg.headers as any)?.['payment-signature'];
+      if (sig) {
+        const payload = JSON.parse(atob(sig));
+        const tx = deserializeTransaction(payload.payload.transaction.replace(/^0x/, ''));
+        tx.auth.spendingCondition.signer = createAddress(victim).hash160;
+        payload.payload.transaction = tx.serialize();
+        (cfg.headers as any)['payment-signature'] = btoa(JSON.stringify(payload));
+      }
+      return cfg;
+    });
+    const res = await api.post('/paid', {}).catch((e: AxiosError) => e.response!);
+    expect(res.status).toBe(400);
+    expect(res.data.error).toBe('Invalid payment transaction');
+  });
+
+  it('refuses a settle whose txid reconciliation already credited', async () => {
+    expect((await pay()).res.status).toBe(200); // reconciled 0xabc
+    net.lastExecutedNonce = 6;
+    verifierSettle.mockResolvedValue({ success: true, transaction: '0xABC', network: 'stacks:2147483648', payer: 'payer' });
+    const late = await pay(); // slow settle of the same tx returns afterwards
+    expect(late.res.status).toBe(409);
+    expect(late.res.data.reason).toBe('PAYMENT_ALREADY_USED');
   });
 
   it('two concurrent claims of one payment: exactly one is served', async () => {
