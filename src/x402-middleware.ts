@@ -215,14 +215,23 @@ export async function markPaymentUsed(db: MarkDB, txid: string, now = Date.now()
 export const MARK_RETRY_DELAYS_MS = [50, 250];
 
 /**
- * markPaymentUsed for a payment that has already settled, retried on transient
- * D1 errors. Returns markPaymentUsed's answer, or null when every attempt threw
- * (logged with the txid so the unmarked payment can be found).
+ * markPaymentUsed for a payment that has already settled, retried when the write
+ * throws. Returns true when this call made the mark, false when another request
+ * already held it, or null when the answer is unknown: every attempt threw
+ * (logged with the txid so the unmarked payment can be found), or an attempt
+ * threw and a retry then found the mark. D1 does not retry writes itself, and a
+ * write can commit before the error reaches the Worker, so that mark may be this
+ * request's own (https://developers.cloudflare.com/d1/observability/debug-d1/).
  */
 async function markSettledPayment(db: MarkDB, txid: string, payer: string): Promise<boolean | null> {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await markPaymentUsed(db, txid);
+      const fresh = await markPaymentUsed(db, txid);
+      if (!fresh && attempt > 0) {
+        console.error('payment mark uncertain', { txid, payer, attempts: attempt + 1 });
+        return null;
+      }
+      return fresh;
     } catch (e) {
       if (attempt >= MARK_RETRY_DELAYS_MS.length) {
         console.error('payment mark failed', { txid, payer, attempts: attempt + 1, error: String(e) });
@@ -830,8 +839,9 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
   // Mark the settled txid so reconciliation never credits it again. A mark that
   // already exists means another request was served for this txid (reconciled
   // while a slow settle was in flight, or the same tx resubmitted): refuse.
-  // Already charged at this point, so a write that still fails after retries is
-  // logged and served: without the mark the payer could reconcile this txid once
+  // Already charged at this point, so a write that still fails after retries,
+  // or whose retry cannot tell its own mark from another request's, is logged
+  // and served: without the mark the payer could reconcile this txid once
   // more, which beats charging them for nothing.
   if (markDb && settleResult.transaction) {
     const fresh = await markSettledPayment(markDb, settleResult.transaction, txInfo.origin);
@@ -840,6 +850,7 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
         error: 'Payment already used by another request',
         code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
         reason: 'PAYMENT_ALREADY_USED',
+        retryable: false,
         txid: settleResult.transaction,
       }, 409);
     }

@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS provider_keys (
 
 -- Payment txids already credited to a request (x402 settle or used-nonce
 -- reconciliation). The primary key makes claiming a txid atomic. Pruned by the
--- cron after 8 days. Existing DBs: run this statement.
+-- cron after 30 days (PAYMENT_MARK_RETENTION_SECONDS). Existing DBs: run this statement.
 CREATE TABLE IF NOT EXISTS payment_marks (
   txid      TEXT PRIMARY KEY,  -- lowercase hex, no 0x
   marked_at TEXT NOT NULL
