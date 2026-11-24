@@ -299,6 +299,41 @@ describe('used-nonce reconciliation (#43)', () => {
     err.mockRestore();
   });
 
+  /** The next payment_marks write commits, then throws (D1 "Network connection lost." after the commit). */
+  function commitThenThrowOnce() {
+    const real = db.prepare.bind(db);
+    let armed = true;
+    (db as any).prepare = (sql: string) => {
+      const stmt = real(sql);
+      if (!armed || !sql.includes('payment_marks')) return stmt;
+      return {
+        bind: (...v: unknown[]) => {
+          const bound = stmt.bind(...v);
+          return { run: async () => { await bound.run(); armed = false; throw new Error('Network connection lost.'); } };
+        },
+      };
+    };
+  }
+
+  it('serves the payer when a mark write committed but threw, instead of 409 on its own mark', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    commitThenThrowOnce();
+    const { settled, claim } = await settleThenReconcile();
+    expect(settled.res.status).toBe(200);
+    expect(claim.res.status).toBe(402); // the mark is in place, so reconcile still refuses
+    expect(claim.res.data.detail).toBe('already credited to another request');
+    err.mockRestore();
+  });
+
+  it('marks PAYMENT_ALREADY_USED as not retryable (409 is also the retryable PAYER_TX_PENDING)', async () => {
+    expect((await pay()).res.status).toBe(200);
+    net.lastExecutedNonce = 6;
+    verifierSettle.mockResolvedValue({ success: true, transaction: '0xABC', network: 'stacks:2147483648', payer: 'payer' });
+    const late = await pay();
+    expect(late.res.status).toBe(409);
+    expect(late.res.data.retryable).toBe(false);
+  });
+
   it('two concurrent claims of one payment: exactly one is served', async () => {
     const post = payer();
     const results = await Promise.all([post(), post()]);
